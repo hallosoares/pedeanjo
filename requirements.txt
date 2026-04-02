@@ -1,5 +1,4 @@
 # Core dependencies
 yfinance>=0.2.36
 pandas>=2.0
-pandas_ta>=0.3.14
 requests>=2.31

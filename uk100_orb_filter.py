@@ -14,7 +14,6 @@ Usage:
 Data sources (all free, no API keys):
     - yfinance        : Futures, FX, FTSE prices, ATR, volume, VIX
     - ForexFactory    : Economic calendar with impact levels (cached locally)
-    - pandas_ta       : Bollinger Bands / Keltner Channel squeeze detection
 
 Author : fesimon (pedeanjo)
 Version: 6.0.0
