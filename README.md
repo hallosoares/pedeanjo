@@ -2,25 +2,31 @@
 
 Ferramenta profissional de filtragem pré-abertura para a estratégia de **Opening Range Breakout (ORB)** no FTSE 100 (UK100).
 
-Corre antes da abertura de Londres (~07:15 UK time), busca dados reais de mercado, calcula 5 módulos de scoring e diz-te se o dia é favorável, se deves operar com cautela ou se é melhor não operar.
+Corre antes da abertura de Londres (~07:15 UK time), busca dados reais de mercado, calcula **6 módulos de scoring** (11 sinais independentes) e diz-te se o dia é favorável, se deves operar com cautela ou se é melhor não operar.
 
 ---
 
 ## O que esse treco faz ??
 
-- Busca **dados reais em tempo real** (10 tickers: S&P 500 futures, DAX, Euro Stoxx 50, Crude Oil, Gold, GBP/USD, FTSE 100, VIX, **Nikkei 225, Hang Seng**)
+- Busca **dados reais em tempo real** (10+ tickers: S&P 500 futures, DAX, Euro Stoxx 50, Crude Oil, Gold, GBP/USD, FTSE 100, VIX, **Nikkei 225, Hang Seng** + GBP/JPY, GBP/CHF, EUR/GBP, VIX3M, Yields)
 - Busca o **calendário económico ForexFactory** (notícias de alto/médio impacto — GBP, USD, EUR)
 - Calcula **ATR volatility regime** + **Bollinger Squeeze** (Bollinger Bands dentro de Keltner Channels)
 - Analisa o **VIX** (medo de mercado) para contexto de volatilidade
 - Calcula o **RSI 14 dias do FTSE** — deteta sobrecomprado/sobrevendido antes do open
 - Avalia a **sessão asiática** (Nikkei + Hang Seng) — o principal driver do gap de abertura do FTSE
-- Avalia **5 módulos** (0-11 pontos):
+- **VIX Term Structure** — contango (calmo) vs backwardation (pânico) — mede a estrutura do medo
+- **Curva de Yields** (US 2Y/10Y) — deteta inversão = sinal de recessão
+- **Divergência Intermercados** — FTSE vs DAX/SPX multi-day, deteta dislocações
+- **Sazonalidade** — padrões históricos FTSE ORB por dia da semana
+- **Força da GBP** — GBP vs basket (USD, JPY, CHF, EUR) — confirmação de momentum
+- Avalia **6 módulos** (0-14 pontos):
   1. **Eventos Macro** (0-3) — notícias de alto impacto perto da abertura?
   2. **Sentimento Global** (0-2) — futuros alinhados + sessão asiática?
   3. **Correlações** (0-2) — Oil, Gold, GBP/USD coerentes?
   4. **Volatilidade** (0-2) — ATR + VIX + BB Squeeze + volume + RSI
   5. **Estrutura Pré-Abertura** (0-2) — mercado esticado ou limpo?
-- Classifica: **DIA FAVORÁVEL** (8-11) / **OPERAR COM CAUTELA** (5-7) / **NÃO OPERAR** (0-4)
+  6. **Sinais Avançados** (0-3) — VIX structure + yields + divergência + sazonalidade + força GBP
+- Classifica: **DIA FAVORÁVEL** (10-14) / **OPERAR COM CAUTELA** (6-9) / **NÃO OPERAR** (0-5)
 - Indica **direção**: COMPRADO / VENDIDO / NÃO OPERAR
 - **Regista cada análise** em `analysis_log.jsonl` — rastreia a precisão ao longo do tempo
 - Tudo em **Português**, formato institucional
@@ -98,9 +104,13 @@ pedeanjo_go --history 20
     Score: 2/2  [##]
     Bem posicionado para rompimento limpo. FTSE gap: +0.25%
 
+  6. SINAIS AVANÇADOS
+    Score: 3/3  [###]
+    Forte alinhamento de sinais avançados (+4). VIX: contango | Yields: normal | Divergência: none | Quarta-feira (high) | GBP: strong
+
 ----------------------------------------------------------------
 
-   Score: 11/11
+   Score: 14/14
    Classificação: DIA FAVORÁVEL
    Direção: COMPRADO (Long)
 ================================================================
@@ -119,9 +129,14 @@ pedeanjo_go --history 20
 | **Volume FTSE** | Ratio volume/média 5 dias — detecta spike institucional ou volume seco | O LLM não tem acesso a dados de volume |
 | **Tendência multi-day** | 5-10 dias de closes reais, consistência e momentum calculados | O LLM "adivinha" a tendência |
 | **Volatilidade** | ATR calculado + Bollinger Squeeze real | O LLM "adivinha" se há volatilidade |
+| **VIX Term Structure** | Contango/backwardation — estrutura do medo, não só o nível | O LLM não sabe a curva do VIX |
+| **Yield Curve** | Spread 2Y/10Y real — deteta inversão e regime de recessão | O LLM não tem acesso a yields |
+| **Divergência** | FTSE vs DAX/SPX multi-day — deteta dislocações | O LLM não compara séries temporais |
+| **Sazonalidade** | Padrões ORB por dia da semana (Quarta = melhor, Sexta = pior) | O LLM pode mencionar mas não aplica |
+| **Força GBP** | GBP vs 4 pares (USD, JPY, CHF, EUR) — confirma momentum | O LLM não compara pairs em tempo real |
 | **Calendário** | ForexFactory com impacto, hora, país — filtrado automaticamente | O LLM pode alucinar eventos que não existem |
 | **Consistência** | Regras fixas, mesmo input = mesmo output | O LLM dá respostas diferentes cada vez |
-| **Velocidade** | ~10 segundos | Abrir browser, colar prompt, esperar... |
+| **Velocidade** | ~15 segundos | Abrir browser, colar prompt, esperar... |
 | **Histórico** | `analysis_log.jsonl` — regista cada análise para validar precisão | O LLM não tem memória de sessões anteriores |
 
 ---
@@ -130,10 +145,17 @@ pedeanjo_go --history 20
 
 ```
 pedeanjo/
-  uk100_orb_filter.py   # Ferramenta principal (~1400 linhas)
-  pedeanjo_go            # Shell launcher (funciona de qualquer pasta)
-  requirements.txt       # Dependências Python
-  analysis_log.jsonl     # Histórico de análises (auto-gerado)
+  uk100_orb_filter.py        # Ferramenta principal + 6 módulos de scoring
+  signals/                   # Sinais avançados (módulos independentes)
+    __init__.py
+    vix_term_structure.py    # VIX contango/backwardation
+    bond_yield_curve.py      # US 2Y/10Y spread
+    intermarket_divergence.py # FTSE vs DAX/SPX divergência
+    seasonality.py           # Padrões ORB por dia da semana
+    currency_strength.py     # GBP vs basket (USD, JPY, CHF, EUR)
+  pedeanjo_go                # Shell launcher (funciona de qualquer pasta)
+  requirements.txt           # Dependências Python
+  analysis_log.jsonl         # Histórico de análises (auto-gerado)
   .gitignore
   README.md
 ```

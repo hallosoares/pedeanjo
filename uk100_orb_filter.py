@@ -17,7 +17,7 @@ Data sources (all free, no API keys):
     - pandas_ta       : Bollinger Bands / Keltner Channel squeeze detection
 
 Author : fesimon (pedeanjo)
-Version: 5.0.0
+Version: 6.0.0
 """
 
 import argparse
@@ -29,6 +29,14 @@ from pathlib import Path
 import pandas as pd
 import requests
 import yfinance as yf
+
+from signals import (
+    compute_vix_term_structure,
+    compute_bond_yield_curve,
+    compute_intermarket_divergence,
+    compute_seasonality,
+    compute_currency_strength,
+)
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -653,10 +661,11 @@ def compute_multiday_trend(market_data: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 5 SCORING MODULES
+# 6 SCORING MODULES
 # Module 1 uses 0-3 scale (macro events are the #1 fakeout predictor for ORB)
 # Modules 2-5 use 0-2 scale
-# Total: 0-11
+# Module 6 uses 0-3 scale (advanced signals aggregate)
+# Total: 0-14
 # ---------------------------------------------------------------------------
 
 def score_1_macro_events(calendar_data: dict) -> tuple[int, str]:
@@ -932,6 +941,78 @@ def score_5_preopen_structure(
     return score, f"Dados de gap indisponíveis.{trend_str}"
 
 
+def score_6_advanced_signals(
+    vix_ts_data: dict,
+    bond_data: dict,
+    divergence_data: dict,
+    seasonality_data: dict,
+    currency_data: dict,
+) -> tuple[int, str]:
+    """
+    6. SINAIS AVANÇADOS (0-3 pontos)
+       Combines 5 new edge signals:
+       - VIX term structure (contango/backwardation)
+       - Bond yield curve (normal/inverted)
+       - Intermarket divergence (aligned/divergent)
+       - Day-of-week seasonality (trend day / reversion day)
+       - GBP currency strength (strong/weak/mixed)
+
+       Each signal contributes a hint (+1, 0, -1).
+       Sum of hints → mapped to 0-3 scale.
+       0 = Majority negative signals (multiple headwinds)
+       1 = Mixed / neutral
+       2 = Slightly positive
+       3 = Strong alignment — multiple tailwinds
+    """
+    hints = []
+    details = []
+
+    # VIX term structure
+    vix_hint = vix_ts_data.get("score_hint", 0)
+    hints.append(vix_hint)
+    vix_struct = vix_ts_data.get("structure", "?")
+    details.append(f"VIX: {vix_struct}")
+
+    # Bond yield curve
+    bond_hint = bond_data.get("score_hint", 0)
+    hints.append(bond_hint)
+    bond_regime = bond_data.get("regime", "?")
+    details.append(f"Yields: {bond_regime}")
+
+    # Intermarket divergence
+    div_hint = divergence_data.get("score_hint", 0)
+    hints.append(div_hint)
+    div_level = divergence_data.get("divergence_level", "?")
+    details.append(f"Divergência: {div_level}")
+
+    # Seasonality
+    season_hint = seasonality_data.get("score_hint", 0)
+    hints.append(season_hint)
+    day_name = seasonality_data.get("day_name", "?")
+    quality = seasonality_data.get("quality", "?")
+    details.append(f"{day_name} ({quality})")
+
+    # Currency strength
+    curr_hint = currency_data.get("score_hint", 0)
+    hints.append(curr_hint)
+    gbp_str = currency_data.get("gbp_strength", "?")
+    details.append(f"GBP: {gbp_str}")
+
+    # Sum hints: range is -5 to +5 → map to 0-3
+    total_hint = sum(hints)
+    detail_str = " | ".join(details)
+
+    if total_hint >= 4:
+        return 3, f"Forte alinhamento de sinais avançados ({total_hint:+d}). {detail_str}"
+    if total_hint >= 2:
+        return 2, f"Sinais avançados positivos ({total_hint:+d}). {detail_str}"
+    if total_hint >= 0:
+        return 1, f"Sinais avançados neutros ({total_hint:+d}). {detail_str}"
+    if total_hint >= -2:
+        return 0, f"Sinais avançados negativos ({total_hint:+d}). {detail_str}"
+    return 0, f"Múltiplos headwinds ({total_hint:+d}). {detail_str}"
+
+
 # ---------------------------------------------------------------------------
 # DIRECTION LOGIC
 # ---------------------------------------------------------------------------
@@ -943,10 +1024,10 @@ def determine_direction(
 ) -> str:
     """
     Determine trade direction based on score + global sentiment alignment.
-    Scale: 0-11 (Module 1 = 0-3, Modules 2-5 = 0-2 each).
+    Scale: 0-14 (Module 1 = 0-3, Modules 2-5 = 0-2 each, Module 6 = 0-3).
     Returns: "COMPRADO" / "VENDIDO" / "NÃO OPERAR"
     """
-    if total_score < 5:
+    if total_score < 6:
         return "NÃO OPERAR"
 
     spx = _safe_pct(market_data, "SPX_futures")
@@ -965,7 +1046,7 @@ def determine_direction(
             elif val < -0.15:
                 bearish_signals += 1
 
-    if total_score >= 8:
+    if total_score >= 10:
         # Strong day — go with consensus
         if bullish_signals >= 3:
             return "COMPRADO"
@@ -977,7 +1058,7 @@ def determine_direction(
             return "VENDIDO"
         return "NÃO OPERAR"
 
-    if total_score >= 5:
+    if total_score >= 6:
         # Cautious day — need strong consensus
         if bullish_signals >= 3:
             return "COMPRADO"
@@ -993,10 +1074,10 @@ def determine_direction(
 # ---------------------------------------------------------------------------
 
 def format_classification(score: int) -> str:
-    """Classify score on 0-11 scale."""
-    if score >= 8:
+    """Classify score on 0-14 scale."""
+    if score >= 10:
         return "DIA FAVORÁVEL"
-    if score >= 5:
+    if score >= 6:
         return "OPERAR COM CAUTELA"
     return "NÃO OPERAR"
 
@@ -1020,9 +1101,9 @@ def build_summary(
     lines = []
 
     # Line 1: Overall assessment
-    if total_score >= 8:
+    if total_score >= 10:
         lines.append("Dia com condições favoráveis para ORB com continuidade.")
-    elif total_score >= 5:
+    elif total_score >= 6:
         lines.append("Condições mistas. Risco de fakeout moderado. Reduzir exposição.")
     else:
         lines.append("Condições desfavoráveis. Alto risco de fakeout. Recomendação: não operar.")
@@ -1058,6 +1139,7 @@ def build_summary(
 def print_full_output(
     scores: list[tuple[int, str]],
     total_score: int,
+    max_score: int,
     classification: str,
     direction: str,
     summary: str,
@@ -1069,6 +1151,11 @@ def print_full_output(
     rsi_data: dict,
     asian_data: dict,
     structure_data: dict,
+    vix_ts_data: dict,
+    bond_data: dict,
+    divergence_data: dict,
+    seasonality_data: dict,
+    currency_data: dict,
     show_raw: bool = False,
 ):
     """Print the complete formatted output."""
@@ -1079,6 +1166,7 @@ def print_full_output(
         "3. CORRELAÇÕES CHAVE",
         "4. CONDIÇÃO DE VOLATILIDADE",
         "5. ESTRUTURA PRÉ-ABERTURA",
+        "6. SINAIS AVANÇADOS",
     ]
 
     print()
@@ -1089,7 +1177,7 @@ def print_full_output(
     print()
 
     # Individual module scores
-    max_scores = [3, 2, 2, 2, 2]  # Module 1 = 0-3, rest = 0-2
+    max_scores = [3, 2, 2, 2, 2, 3]  # Module 1 = 0-3, 2-5 = 0-2, 6 = 0-3
     for i, (score_val, detail) in enumerate(scores):
         mx = max_scores[i]
         bar = "#" * score_val + "." * (mx - score_val)
@@ -1101,7 +1189,7 @@ def print_full_output(
     # Final output in the exact fixed format
     print("-" * 64)
     print()
-    print(f"   Score: {total_score}/11")
+    print(f"   Score: {total_score}/{max_score}")
     print(f"   Classificação: {classification}")
     print(f"   Direção: {format_direction(direction)}")
     print()
@@ -1180,6 +1268,40 @@ def print_full_output(
     if t_dir != "unknown" and t_days > 0:
         print(f"   Tendência {t_days}d: {t_dir} | Consistência: {t_cons:.0%} | Momentum: {t_mom}")
 
+    # --- Advanced Signals ---
+    print()
+    print("   SINAIS AVANÇADOS:")
+
+    # VIX term structure
+    vix_struct = vix_ts_data.get("structure", "unknown")
+    if vix_struct != "unknown":
+        vix_ratio = vix_ts_data.get("ratio", 0)
+        vix_sev = vix_ts_data.get("severity", "?")
+        print(f"   VIX Term Structure: {vix_struct} ({vix_sev}) — ratio {vix_ratio:.3f}")
+
+    # Bond yield curve
+    bond_regime = bond_data.get("regime", "unknown")
+    if bond_regime != "unknown":
+        spread = bond_data.get("spread", 0)
+        print(f"   Yield Curve: {bond_regime} — spread {spread:+.2f}pp")
+
+    # Intermarket divergence
+    div_level = divergence_data.get("divergence_level", "unknown")
+    if div_level != "unknown":
+        agreement = divergence_data.get("daily_agreement", 0)
+        print(f"   Divergência Intermercados: {div_level} — concordância diária {agreement:.0%}")
+
+    # Seasonality
+    day_name = seasonality_data.get("day_name", "?")
+    day_quality = seasonality_data.get("quality", "?")
+    day_bias = seasonality_data.get("bias", "?")
+    print(f"   Sazonalidade: {day_name} — qualidade ORB: {day_quality} | bias: {day_bias}")
+
+    # Currency strength
+    gbp_str = currency_data.get("gbp_strength", "unknown")
+    if gbp_str != "unknown":
+        print(f"   Força GBP: {gbp_str}")
+
     # Calendar highlights
     if calendar_data.get("near_open_high_impact"):
         print()
@@ -1216,11 +1338,19 @@ def print_full_output(
             "rsi": rsi_data,
             "asian_session": asian_data,
             "structure": structure_data,
+            "vix_term_structure": vix_ts_data,
+            "bond_yield_curve": bond_data,
+            "intermarket_divergence": {
+                k: v for k, v in divergence_data.items()
+            },
+            "seasonality": seasonality_data,
+            "currency_strength": currency_data,
             "scores": [
                 {"module": section_names[i], "score": s, "detail": d}
                 for i, (s, d) in enumerate(scores)
             ],
             "total_score": total_score,
+            "max_score": max_score,
             "classification": classification,
             "direction": direction,
         }
@@ -1230,6 +1360,7 @@ def print_full_output(
 def output_json(
     scores: list[tuple[int, str]],
     total_score: int,
+    max_score: int,
     classification: str,
     direction: str,
     summary: str,
@@ -1241,6 +1372,11 @@ def output_json(
     rsi_data: dict,
     asian_data: dict,
     structure_data: dict,
+    vix_ts_data: dict,
+    bond_data: dict,
+    divergence_data: dict,
+    seasonality_data: dict,
+    currency_data: dict,
 ):
     """Output the analysis as a JSON object."""
     section_names = [
@@ -1249,15 +1385,18 @@ def output_json(
         "correlations",
         "volatility",
         "preopen_structure",
+        "advanced_signals",
     ]
+    max_per_module = [3, 2, 2, 2, 2, 3]
     result = {
         "timestamp": datetime.now().isoformat(),
         "score": total_score,
+        "max_score": max_score,
         "classification": classification,
         "direction": direction,
         "summary": summary,
         "modules": {
-            section_names[i]: {"score": s, "max": 3 if i == 0 else 2, "detail": d}
+            section_names[i]: {"score": s, "max": max_per_module[i], "detail": d}
             for i, (s, d) in enumerate(scores)
         },
         "market_snapshot": {
@@ -1279,6 +1418,15 @@ def output_json(
         },
         "asian_session": {
             k: v for k, v in asian_data.items()
+        },
+        "advanced_signals": {
+            "vix_term_structure": vix_ts_data,
+            "bond_yield_curve": bond_data,
+            "intermarket_divergence": {
+                k: v for k, v in divergence_data.items()
+            },
+            "seasonality": seasonality_data,
+            "currency_strength": currency_data,
         },
         "calendar": {
             "high_impact_count": calendar_data["total_high"],
@@ -1316,7 +1464,7 @@ def run_analysis(show_raw: bool = False, output_format: str = "text") -> dict:
 
     # 1. Fetch data
     if output_format == "text":
-        print("  [1/3] Calendário económico...")
+        print("  [1/4] Calendário económico...")
     raw_calendar = fetch_economic_calendar()
     calendar_available = len(raw_calendar) > 0
     calendar_data = filter_events_for_today(raw_calendar, now)
@@ -1324,11 +1472,11 @@ def run_analysis(show_raw: bool = False, output_format: str = "text") -> dict:
         calendar_data["calendar_unavailable"] = True
 
     if output_format == "text":
-        print("  [2/3] Dados de mercado (futuros, FX, índices)...")
+        print("  [2/4] Dados de mercado (futuros, FX, índices)...")
     market_data = fetch_market_data()
 
     if output_format == "text":
-        print("  [3/3] Volatilidade, volume, RSI, sessão asiática e estrutura pré-abertura...")
+        print("  [3/4] Volatilidade, volume, RSI, sessão asiática e estrutura pré-abertura...")
     vol_data = compute_ftse_volatility(market_data)
     volume_data = compute_ftse_volume_profile(market_data)
     trend_data = compute_multiday_trend(market_data)
@@ -1337,17 +1485,27 @@ def run_analysis(show_raw: bool = False, output_format: str = "text") -> dict:
     structure_data = compute_preopen_structure(market_data)
 
     if output_format == "text":
+        print("  [4/4] Sinais avançados (VIX structure, yields, divergência, sazonalidade, FX)...")
+    vix_ts_data = compute_vix_term_structure()
+    bond_data = compute_bond_yield_curve()
+    divergence_data = compute_intermarket_divergence(market_data)
+    seasonality_data = compute_seasonality(now)
+    currency_data = compute_currency_strength(market_data)
+
+    if output_format == "text":
         print("\n   Dados carregados. A calcular scores...\n")
 
-    # 2. Score all 5 modules
+    # 2. Score all 6 modules
     s1 = score_1_macro_events(calendar_data)
     s2 = score_2_global_sentiment(market_data, asian_data)
     s3 = score_3_correlations(market_data)
     s4 = score_4_volatility(vol_data, market_data, volume_data, rsi_data)
     s5 = score_5_preopen_structure(structure_data, trend_data)
+    s6 = score_6_advanced_signals(vix_ts_data, bond_data, divergence_data, seasonality_data, currency_data)
 
-    scores = [s1, s2, s3, s4, s5]
+    scores = [s1, s2, s3, s4, s5, s6]
     total_score = sum(s for s, _ in scores)
+    max_score = 14  # 3 + 2 + 2 + 2 + 2 + 3
 
     # 3. Classification + direction
     classification = format_classification(total_score)
@@ -1359,13 +1517,15 @@ def run_analysis(show_raw: bool = False, output_format: str = "text") -> dict:
     # 5. Output
     if output_format == "json":
         output_json(
-            scores, total_score, classification, direction, summary,
+            scores, total_score, max_score, classification, direction, summary,
             calendar_data, market_data, vol_data, volume_data, trend_data, rsi_data, asian_data, structure_data,
+            vix_ts_data, bond_data, divergence_data, seasonality_data, currency_data,
         )
     else:
         print_full_output(
-            scores, total_score, classification, direction, summary,
+            scores, total_score, max_score, classification, direction, summary,
             calendar_data, market_data, vol_data, volume_data, trend_data, rsi_data, asian_data, structure_data,
+            vix_ts_data, bond_data, divergence_data, seasonality_data, currency_data,
             show_raw=show_raw,
         )
 
@@ -1374,6 +1534,7 @@ def run_analysis(show_raw: bool = False, output_format: str = "text") -> dict:
         "timestamp": now.isoformat(),
         "mode": "rule-based",
         "score": total_score,
+        "max_score": max_score,
         "classification": classification,
         "direction": direction,
         "summary": summary,
@@ -1388,7 +1549,7 @@ def run_analysis(show_raw: bool = False, output_format: str = "text") -> dict:
     log_entry = {
         "timestamp": now.isoformat(),
         "score": total_score,
-        "max_score": 11,
+        "max_score": max_score,
         "classification": classification,
         "direction": direction,
         "modules": {
@@ -1397,11 +1558,16 @@ def run_analysis(show_raw: bool = False, output_format: str = "text") -> dict:
             "correlations": scores[2][0],
             "volatility": scores[3][0],
             "structure": scores[4][0],
+            "advanced": scores[5][0],
         },
         "rsi": rsi_data.get("rsi"),
         "asian_direction": asian_data.get("direction"),
         "volume_trend": volume_data.get("volume_trend"),
         "trend_direction": trend_data.get("direction"),
+        "vix_structure": vix_ts_data.get("structure"),
+        "bond_regime": bond_data.get("regime"),
+        "divergence_level": divergence_data.get("divergence_level"),
+        "gbp_strength": currency_data.get("gbp_strength"),
     }
     try:
         with open(ANALYSIS_LOG_FILE, "a", encoding="utf-8") as f:
@@ -1475,12 +1641,15 @@ def _print_history(n: int = 10):
     for e in entries:
         ts = e.get("timestamp", "?")[:16].replace("T", " ")
         score = e.get("score", "?")
+        mx = e.get("max_score", 11)  # backward compat with old entries
         cls = e.get("classification", "?")
         direction = e.get("direction", "?")
         asian = e.get("asian_direction", "?")
         rsi = e.get("rsi")
         rsi_str = f"  RSI:{rsi}" if rsi is not None else ""
-        print(f"  {ts}  {score:>2}/11  {cls:<22}  {direction:<8}  Ásia:{asian}{rsi_str}")
+        vix_s = e.get("vix_structure")
+        vix_str = f"  VIX:{vix_s}" if vix_s else ""
+        print(f"  {ts}  {score:>2}/{mx}  {cls:<22}  {direction:<12}  Ásia:{asian}{rsi_str}{vix_str}")
     print("=" * 64)
     print()
 
