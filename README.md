@@ -1,4 +1,4 @@
-# 🇬🇧 UK100 ORB Pre-Open Institutional Filter
+# 🇬🇧 UK100 DIGAO ORB Pre-Open Institutional Filter
 
 Ferramenta de análise pré-abertura para a estratégia de **Opening Range Breakout (ORB)** no FTSE 100 (UK100).
 
@@ -6,7 +6,7 @@ Corre antes da abertura de Londres (~07:15 UK time), busca **dados reais de merc
 
 ---
 
-## ⚡ Instalação (Windows)
+## Instalação (Windows)
 
 ### Pré-requisitos (só uma vez)
 
@@ -39,7 +39,7 @@ cd "$HOME\Desktop\pedeanjo"; venv\Scripts\python uk100_orb_filter.py
 
 ---
 
-## ⚡ Instalação (Linux / macOS)
+## Instalação (Linux / macOS)
 
 ```bash
 cd ~/Desktop && git clone https://github.com/hallosoares/pedeanjo.git && cd pedeanjo && python3 -m venv venv && venv/bin/pip install -r requirements.txt && chmod +x pedeanjo_go && mkdir -p ~/.local/bin && ln -sf "$(pwd)/pedeanjo_go" ~/.local/bin/pedeanjo_go && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc && pedeanjo_go
@@ -49,7 +49,7 @@ Depois é só escrever `pedeanjo_go` em qualquer terminal.
 
 ---
 
-## �� Opções
+## Opções
 
 ```
 pedeanjo_go                  # Análise completa (usa isto todos os dias)
@@ -61,7 +61,7 @@ pedeanjo_go --raw            # Mostra raw data (debug)
 
 ---
 
-## 📊 O que analisa
+##  O que analisa
 
 | # | Módulo | Pontos | O que faz |
 |---|--------|--------|-----------|
@@ -77,13 +77,13 @@ pedeanjo_go --raw            # Mostra raw data (debug)
 
 | Score | Classificação | O que fazer |
 |-------|--------------|-------------|
-| 10-14 | 🟢 **DIA FAVORÁVEL** | Operar ORB com confiança |
-| 6-9 | 🟡 **OPERAR COM CAUTELA** | Reduzir tamanho, stops mais apertados |
-| 0-5 | �� **NÃO OPERAR** | Ficar de fora |
+| 10-14 |  **DIA FAVORÁVEL** | Operar ORB com confiança |
+| 6-9 |  **OPERAR COM CAUTELA** | Reduzir tamanho, stops mais apertados |
+| 0-5 |  **NÃO OPERAR** | Ficar de fora |
 
 ---
 
-## 📋 Output de exemplo
+##  Output de exemplo
 
 ```
 ================================================================
@@ -125,7 +125,7 @@ pedeanjo_go --raw            # Mostra raw data (debug)
 
 ---
 
-## 📡 11 Sinais em Tempo Real
+##  11 Sinais em Tempo Real
 
 Todos os dados são buscados **ao vivo** (yfinance + ForexFactory). Sem API keys. Sem custos.
 
@@ -143,24 +143,3 @@ Todos os dados são buscados **ao vivo** (yfinance + ForexFactory). Sem API keys
 | Sazonalidade | Padrões ORB por dia da semana |
 | Força GBP vs basket | GBP vs USD, JPY, CHF, EUR |
 
----
-
-## 🔄 Actualizar
-
-Quando houver uma versão nova:
-
-**Windows (PowerShell):**
-```powershell
-cd "$HOME\Desktop\pedeanjo"; git pull; venv\Scripts\pip install -r requirements.txt
-```
-
-**Linux/macOS:**
-```bash
-cd ~/Desktop/pedeanjo && git pull && venv/bin/pip install -r requirements.txt
-```
-
----
-
-## Licença
-
-Uso pessoal / interno. Desenvolvido por fesimon.
