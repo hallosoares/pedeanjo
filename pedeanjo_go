@@ -3,15 +3,16 @@
 # Usage: pedeanjo_go [OPTIONS]
 #
 # Options (passed through to uk100_orb_filter.py):
-#   --ollama          Use local LLM (Ollama) for institutional analysis
-#   --model MODEL     Ollama model to use (default: llama3.1:8b)
-#   --raw             Show raw LLM response / debug data
+#   --raw             Show raw data at the end (debug)
 #   --json            Output JSON instead of formatted text
+#   --history [N]     Show last N analysis entries (default: 10)
 #
 # Examples:
-#   pedeanjo_go                  # Rule-based scoring
-#   pedeanjo_go --ollama         # LLM-powered analysis
-#   pedeanjo_go --ollama --raw   # LLM analysis + raw response
+#   pedeanjo_go                  # Full pre-open analysis
+#   pedeanjo_go --raw            # Analysis + raw data
+#   pedeanjo_go --json           # Machine-readable JSON output
+#   pedeanjo_go --history        # Last 10 analysis entries
+#   pedeanjo_go --history 20     # Last 20 entries
 
 set -euo pipefail
 

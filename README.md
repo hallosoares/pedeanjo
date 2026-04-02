@@ -1,82 +1,91 @@
-# UK100 ORB Pre-Open Institutional Filter
+# 🇬🇧 UK100 ORB Pre-Open Institutional Filter
 
-Ferramenta profissional de filtragem pré-abertura para a estratégia de **Opening Range Breakout (ORB)** no FTSE 100 (UK100).
+Ferramenta de análise pré-abertura para a estratégia de **Opening Range Breakout (ORB)** no FTSE 100 (UK100).
 
-Corre antes da abertura de Londres (~07:15 UK time), busca dados reais de mercado, calcula **6 módulos de scoring** (11 sinais independentes) e diz-te se o dia é favorável, se deves operar com cautela ou se é melhor não operar.
-
----
-
-## O que esse treco faz ??
-
-- Busca **dados reais em tempo real** (10+ tickers: S&P 500 futures, DAX, Euro Stoxx 50, Crude Oil, Gold, GBP/USD, FTSE 100, VIX, **Nikkei 225, Hang Seng** + GBP/JPY, GBP/CHF, EUR/GBP, VIX3M, Yields)
-- Busca o **calendário económico ForexFactory** (notícias de alto/médio impacto — GBP, USD, EUR)
-- Calcula **ATR volatility regime** + **Bollinger Squeeze** (Bollinger Bands dentro de Keltner Channels)
-- Analisa o **VIX** (medo de mercado) para contexto de volatilidade
-- Calcula o **RSI 14 dias do FTSE** — deteta sobrecomprado/sobrevendido antes do open
-- Avalia a **sessão asiática** (Nikkei + Hang Seng) — o principal driver do gap de abertura do FTSE
-- **VIX Term Structure** — contango (calmo) vs backwardation (pânico) — mede a estrutura do medo
-- **Curva de Yields** (US 2Y/10Y) — deteta inversão = sinal de recessão
-- **Divergência Intermercados** — FTSE vs DAX/SPX multi-day, deteta dislocações
-- **Sazonalidade** — padrões históricos FTSE ORB por dia da semana
-- **Força da GBP** — GBP vs basket (USD, JPY, CHF, EUR) — confirmação de momentum
-- Avalia **6 módulos** (0-14 pontos):
-  1. **Eventos Macro** (0-3) — notícias de alto impacto perto da abertura?
-  2. **Sentimento Global** (0-2) — futuros alinhados + sessão asiática?
-  3. **Correlações** (0-2) — Oil, Gold, GBP/USD coerentes?
-  4. **Volatilidade** (0-2) — ATR + VIX + BB Squeeze + volume + RSI
-  5. **Estrutura Pré-Abertura** (0-2) — mercado esticado ou limpo?
-  6. **Sinais Avançados** (0-3) — VIX structure + yields + divergência + sazonalidade + força GBP
-- Classifica: **DIA FAVORÁVEL** (10-14) / **OPERAR COM CAUTELA** (6-9) / **NÃO OPERAR** (0-5)
-- Indica **direção**: COMPRADO / VENDIDO / NÃO OPERAR
-- **Regista cada análise** em `analysis_log.jsonl` — rastreia a precisão ao longo do tempo
-- Tudo em **Português**, formato institucional
+Corre antes da abertura de Londres (~07:15 UK time), busca **dados reais de mercado**, calcula **6 módulos de scoring** (11 sinais independentes) e diz-te se o dia é favorável, se deves operar com cautela ou se é melhor ficar de fora.
 
 ---
 
-## Instalação (1 minuto)
+## ⚡ Instalação Rápida (copy-paste no terminal)
+
+> **Requisitos:** Python 3.10+ e Git. Funciona em Linux, macOS e Windows (WSL).
+
+### 1. Clonar e instalar
 
 ```bash
-# 1. Clonar o repositório
-git clone <URL_DO_REPO> pedeanjo
+git clone https://github.com/hallosoares/pedeanjo.git
 cd pedeanjo
-
-# 2. Criar virtual environment e instalar dependências
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
-
-# 3. (Opcional) Criar atalho global — corre de qualquer pasta
-mkdir -p ~/.local/bin
-ln -sf "$(pwd)/pedeanjo_go" ~/.local/bin/pedeanjo_go
-# Certifica-te que ~/.local/bin está no teu PATH
 ```
 
-Requisitos: **Python 3.10+** (testado com 3.12). Funciona em Linux, macOS e Windows (WSL).
+### 2. Criar o comando `pedeanjo_go` (funciona de qualquer pasta)
+
+```bash
+chmod +x pedeanjo_go
+mkdir -p ~/.local/bin
+ln -sf "$(pwd)/pedeanjo_go" ~/.local/bin/pedeanjo_go
+```
+
+Se `~/.local/bin` não estiver no teu PATH, adiciona esta linha ao teu `~/.bashrc` (ou `~/.zshrc`):
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### 3. Testar
+
+```bash
+pedeanjo_go
+```
+
+É só isto. A partir de agora, abres o terminal e escreves `pedeanjo_go` antes da abertura de Londres.
 
 ---
 
-## Como usar
+## 🚀 Como usar
 
 ```bash
-# Análise completa
-python uk100_orb_filter.py
-
-# Ou com o atalho (de qualquer pasta):
-pedeanjo_go
-
-# Mostrar raw data para debug
-pedeanjo_go --raw
-
-# Output em JSON (para integração com outros tools)
-pedeanjo_go --json
-
-# Ver histórico das últimas 10 análises
-pedeanjo_go --history
-
-# Ver histórico das últimas 20 análises
-pedeanjo_go --history 20
+pedeanjo_go                  # Análise completa (usa isto todos os dias)
+pedeanjo_go --json           # Output em JSON (para integração com outros tools)
+pedeanjo_go --history        # Ver histórico das últimas 10 análises
+pedeanjo_go --history 20     # Ver histórico das últimas 20 análises
+pedeanjo_go --raw            # Mostra raw data no final (debug)
 ```
 
-### Output de exemplo
+Ou, se preferires correr diretamente sem o atalho:
+
+```bash
+cd pedeanjo
+venv/bin/python uk100_orb_filter.py
+```
+
+---
+
+## 📊 O que analisa
+
+| # | Módulo | Pontos | O que faz |
+|---|--------|--------|-----------|
+| 1 | **Eventos Macro** | 0-3 | ForexFactory: notícias de alto impacto perto da abertura? |
+| 2 | **Sentimento Global** | 0-2 | SPX futures, DAX, Euro Stoxx 50 + sessão asiática (Nikkei, Hang Seng) |
+| 3 | **Correlações** | 0-2 | Oil, Gold, GBP/USD — coerentes com direção do FTSE? |
+| 4 | **Volatilidade** | 0-2 | ATR regime + Bollinger Squeeze + VIX + Volume + RSI 14d |
+| 5 | **Estrutura Pré-Abertura** | 0-2 | Mercado esticado ou limpo? + tendência multi-day |
+| 6 | **Sinais Avançados** | 0-3 | VIX term structure + yield curve + divergência + sazonalidade + força GBP |
+| | **TOTAL** | **0-14** | |
+
+### Classificação
+
+| Score | Classificação | O que fazer |
+|-------|--------------|-------------|
+| 10-14 | 🟢 **DIA FAVORÁVEL** | Operar ORB com confiança |
+| 6-9 | 🟡 **OPERAR COM CAUTELA** | Reduzir tamanho, stops mais apertados |
+| 0-5 | 🔴 **NÃO OPERAR** | Ficar de fora |
+
+---
+
+## 📋 Output de exemplo
 
 ```
 ================================================================
@@ -94,7 +103,7 @@ pedeanjo_go --history 20
 
   3. CORRELAÇÕES CHAVE
     Score: 2/2  [##]
-    Alinhamento claro com direção do índice (bullish). Oil: +0.40%, Gold: -0.20%, GBP/USD: +0.35%
+    Alinhamento claro com direção do índice (bullish).
 
   4. CONDIÇÃO DE VOLATILIDADE
     Score: 2/2  [##]
@@ -106,7 +115,7 @@ pedeanjo_go --history 20
 
   6. SINAIS AVANÇADOS
     Score: 3/3  [###]
-    Forte alinhamento de sinais avançados (+4). VIX: contango | Yields: normal | Divergência: none | Quarta-feira (high) | GBP: strong
+    Forte alinhamento de sinais avançados (+4).
 
 ----------------------------------------------------------------
 
@@ -118,34 +127,45 @@ pedeanjo_go --history 20
 
 ---
 
-## Porquê esta ferramenta em vez de colar o prompt no ChatGPT?
+## 📡 11 Sinais em Tempo Real
 
-| | Esta ferramenta | Colar prompt no ChatGPT/Grok |
-|---|---|---|
-| **Dados** | Busca dados REAIS em tempo real (yfinance + ForexFactory) | O LLM não tem acesso a dados live — inventa ou usa dados antigos |
-| **VIX** | Valor actual do VIX com análise de zona (15-25 ideal, >30 perigo) | O LLM não sabe o VIX de hoje |
-| **RSI FTSE** | RSI 14 dias calculado — sobrecomprado/sobrevendido antes do open | O LLM não tem acesso a dados históricos de preço |
-| **Sessão Asiática** | Nikkei + Hang Seng overnight — driver real do gap de abertura do FTSE | O LLM não sabe o que aconteceu esta noite no Japão/HK |
-| **Volume FTSE** | Ratio volume/média 5 dias — detecta spike institucional ou volume seco | O LLM não tem acesso a dados de volume |
-| **Tendência multi-day** | 5-10 dias de closes reais, consistência e momentum calculados | O LLM "adivinha" a tendência |
-| **Volatilidade** | ATR calculado + Bollinger Squeeze real | O LLM "adivinha" se há volatilidade |
-| **VIX Term Structure** | Contango/backwardation — estrutura do medo, não só o nível | O LLM não sabe a curva do VIX |
-| **Yield Curve** | Spread 2Y/10Y real — deteta inversão e regime de recessão | O LLM não tem acesso a yields |
-| **Divergência** | FTSE vs DAX/SPX multi-day — deteta dislocações | O LLM não compara séries temporais |
-| **Sazonalidade** | Padrões ORB por dia da semana (Quarta = melhor, Sexta = pior) | O LLM pode mencionar mas não aplica |
-| **Força GBP** | GBP vs 4 pares (USD, JPY, CHF, EUR) — confirma momentum | O LLM não compara pairs em tempo real |
-| **Calendário** | ForexFactory com impacto, hora, país — filtrado automaticamente | O LLM pode alucinar eventos que não existem |
-| **Consistência** | Regras fixas, mesmo input = mesmo output | O LLM dá respostas diferentes cada vez |
-| **Velocidade** | ~15 segundos | Abrir browser, colar prompt, esperar... |
-| **Histórico** | `analysis_log.jsonl` — regista cada análise para validar precisão | O LLM não tem memória de sessões anteriores |
+Todos os dados são buscados **ao vivo** (yfinance + ForexFactory). Sem API keys. Sem custos.
+
+| Sinal | Fonte | Porquê |
+|-------|-------|--------|
+| S&P 500 futures, DAX, Euro Stoxx 50 | yfinance | Sentimento global antes do FTSE abrir |
+| Nikkei 225, Hang Seng | yfinance | Sessão asiática — driver do gap de abertura |
+| Crude Oil, Gold, GBP/USD | yfinance | Correlações macro — confirmam direção |
+| ATR + Bollinger Squeeze | Calculado | Regime de volatilidade — expansão vs compressão |
+| VIX | yfinance | Nível de medo — 15-25 ideal, >30 perigo |
+| RSI 14 dias FTSE | Calculado | Sobrecomprado/sobrevendido antes do open |
+| Volume FTSE | yfinance | Spike institucional vs volume seco |
+| VIX Term Structure | yfinance (^VIX vs ^VIX3M) | Contango (calmo) vs backwardation (pânico) |
+| Yield Curve US 2Y/10Y | yfinance (^TNX vs 2YY=F) | Inversão = sinal de recessão |
+| Divergência Intermercados | Calculado (FTSE vs DAX/SPX) | Deteta dislocações multi-day |
+| Sazonalidade + Força GBP | Calculado | Dia da semana + GBP vs basket (USD, JPY, CHF, EUR) |
 
 ---
 
-## Estrutura do Projeto
+## 🆚 Porquê isto em vez de perguntar ao ChatGPT?
+
+| | Esta ferramenta | Perguntar ao ChatGPT/Grok |
+|---|---|---|
+| **Dados** | Busca dados REAIS em tempo real | O LLM inventa ou usa dados antigos |
+| **VIX** | Valor actual com análise de zona | Não sabe o VIX de hoje |
+| **Sessão Asiática** | Nikkei + HSI overnight reais | Não sabe o que aconteceu esta noite |
+| **Calendário** | ForexFactory com impacto e hora | Pode alucinar eventos |
+| **Consistência** | Mesmas regras, mesmo input = mesmo output | Respostas diferentes cada vez |
+| **Velocidade** | ~15 segundos | Abrir browser, colar prompt, esperar... |
+| **Histórico** | `analysis_log.jsonl` regista tudo | Sem memória de sessões anteriores |
+
+---
+
+## 📁 Estrutura do Projeto
 
 ```
 pedeanjo/
-  uk100_orb_filter.py        # Ferramenta principal + 6 módulos de scoring
+  uk100_orb_filter.py        # Ferramenta principal (6 módulos de scoring)
   signals/                   # Sinais avançados (módulos independentes)
     __init__.py
     vix_term_structure.py    # VIX contango/backwardation
@@ -156,8 +176,19 @@ pedeanjo/
   pedeanjo_go                # Shell launcher (funciona de qualquer pasta)
   requirements.txt           # Dependências Python
   analysis_log.jsonl         # Histórico de análises (auto-gerado)
-  .gitignore
   README.md
+```
+
+---
+
+## 🔄 Actualizar
+
+Quando houver uma versão nova:
+
+```bash
+cd pedeanjo
+git pull
+venv/bin/pip install -r requirements.txt
 ```
 
 ---
