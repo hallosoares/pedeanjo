@@ -8,18 +8,21 @@ Corre antes da abertura de Londres (~07:15 UK time), busca dados reais de mercad
 
 ## O que esse treco faz ??
 
-- Busca **dados reais em tempo real** (8 tickers: S&P 500 futures, DAX, Euro Stoxx 50, Crude Oil, Gold, GBP/USD, FTSE 100, VIX)
+- Busca **dados reais em tempo real** (10 tickers: S&P 500 futures, DAX, Euro Stoxx 50, Crude Oil, Gold, GBP/USD, FTSE 100, VIX, **Nikkei 225, Hang Seng**)
 - Busca o **calendário económico ForexFactory** (notícias de alto/médio impacto — GBP, USD, EUR)
 - Calcula **ATR volatility regime** + **Bollinger Squeeze** (Bollinger Bands dentro de Keltner Channels)
 - Analisa o **VIX** (medo de mercado) para contexto de volatilidade
+- Calcula o **RSI 14 dias do FTSE** — deteta sobrecomprado/sobrevendido antes do open
+- Avalia a **sessão asiática** (Nikkei + Hang Seng) — o principal driver do gap de abertura do FTSE
 - Avalia **5 módulos** (0-11 pontos):
   1. **Eventos Macro** (0-3) — notícias de alto impacto perto da abertura?
-  2. **Sentimento Global** (0-2) — futuros alinhados (risk-on / risk-off)?
+  2. **Sentimento Global** (0-2) — futuros alinhados + sessão asiática?
   3. **Correlações** (0-2) — Oil, Gold, GBP/USD coerentes?
-  4. **Volatilidade** (0-2) — ATR + VIX + BB Squeeze
+  4. **Volatilidade** (0-2) — ATR + VIX + BB Squeeze + volume + RSI
   5. **Estrutura Pré-Abertura** (0-2) — mercado esticado ou limpo?
 - Classifica: **DIA FAVORÁVEL** (8-11) / **OPERAR COM CAUTELA** (5-7) / **NÃO OPERAR** (0-4)
 - Indica **direção**: COMPRADO / VENDIDO / NÃO OPERAR
+- **Regista cada análise** em `analysis_log.jsonl` — rastreia a precisão ao longo do tempo
 - Tudo em **Português**, formato institucional
 
 ---
@@ -59,6 +62,12 @@ pedeanjo_go --raw
 
 # Output em JSON (para integração com outros tools)
 pedeanjo_go --json
+
+# Ver histórico das últimas 10 análises
+pedeanjo_go --history
+
+# Ver histórico das últimas 20 análises
+pedeanjo_go --history 20
 ```
 
 ### Output de exemplo
@@ -105,12 +114,15 @@ pedeanjo_go --json
 |---|---|---|
 | **Dados** | Busca dados REAIS em tempo real (yfinance + ForexFactory) | O LLM não tem acesso a dados live — inventa ou usa dados antigos |
 | **VIX** | Valor actual do VIX com análise de zona (15-25 ideal, >30 perigo) | O LLM não sabe o VIX de hoje |
+| **RSI FTSE** | RSI 14 dias calculado — sobrecomprado/sobrevendido antes do open | O LLM não tem acesso a dados históricos de preço |
+| **Sessão Asiática** | Nikkei + Hang Seng overnight — driver real do gap de abertura do FTSE | O LLM não sabe o que aconteceu esta noite no Japão/HK |
 | **Volume FTSE** | Ratio volume/média 5 dias — detecta spike institucional ou volume seco | O LLM não tem acesso a dados de volume |
 | **Tendência multi-day** | 5-10 dias de closes reais, consistência e momentum calculados | O LLM "adivinha" a tendência |
 | **Volatilidade** | ATR calculado + Bollinger Squeeze real | O LLM "adivinha" se há volatilidade |
 | **Calendário** | ForexFactory com impacto, hora, país — filtrado automaticamente | O LLM pode alucinar eventos que não existem |
 | **Consistência** | Regras fixas, mesmo input = mesmo output | O LLM dá respostas diferentes cada vez |
 | **Velocidade** | ~10 segundos | Abrir browser, colar prompt, esperar... |
+| **Histórico** | `analysis_log.jsonl` — regista cada análise para validar precisão | O LLM não tem memória de sessões anteriores |
 
 ---
 
@@ -118,9 +130,10 @@ pedeanjo_go --json
 
 ```
 pedeanjo/
-  uk100_orb_filter.py   # Ferramenta principal (~1500 linhas)
+  uk100_orb_filter.py   # Ferramenta principal (~1400 linhas)
   pedeanjo_go            # Shell launcher (funciona de qualquer pasta)
   requirements.txt       # Dependências Python
+  analysis_log.jsonl     # Histórico de análises (auto-gerado)
   .gitignore
   README.md
 ```

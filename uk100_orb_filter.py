@@ -17,7 +17,7 @@ Data sources (all free, no API keys):
     - pandas_ta       : Bollinger Bands / Keltner Channel squeeze detection
 
 Author : fesimon (pedeanjo)
-Version: 4.0.0
+Version: 5.0.0
 """
 
 import argparse
@@ -52,6 +52,8 @@ TICKERS = {
     "GBPUSD":      "GBPUSD=X",   # GBP/USD spot
     "FTSE":        "^FTSE",      # FTSE 100 index
     "VIX":         "^VIX",       # CBOE Volatility Index
+    "NIKKEI":      "^N225",      # Nikkei 225 (Asian session lead)
+    "HSI":         "^HSI",       # Hang Seng Index (Asian session lead)
 }
 
 # ForexFactory calendar URL (free, no key)
@@ -64,6 +66,9 @@ HISTORY_DAYS = "1mo"  # enough for ATR calculation
 # Calendar cache — avoids 429 rate-limit on repeated runs
 CALENDAR_CACHE_FILE = Path(__file__).parent / ".calendar_cache.json"
 CALENDAR_CACHE_TTL_MIN = 30  # minutes
+
+# Session log — append-only history for accuracy tracking
+ANALYSIS_LOG_FILE = Path(__file__).parent / "analysis_log.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +222,9 @@ def fetch_market_data() -> dict[str, dict]:
     for name, ticker_symbol in TICKERS.items():
         try:
             ticker = yf.Ticker(ticker_symbol)
-            df = ticker.history(period="5d", interval="1d")
+            # FTSE needs 1mo for ATR, RSI and multi-day trend; others need only 5d
+            hist_period = "1mo" if name in ("FTSE", "VIX") else "5d"
+            df = ticker.history(period=hist_period, interval="1d")
             if df.empty or len(df) < 2:
                 results[name] = {"last_close": None, "pct_change": None, "df": None}
                 continue
@@ -352,6 +359,147 @@ def compute_preopen_structure(market_data: dict) -> dict:
         "is_extended": is_extended,
         "big_moves": big_moves,
         "ftse_gap_pct": ftse_pct,
+    }
+
+
+def compute_ftse_rsi(market_data: dict, period: int = 14) -> dict:
+    """
+    Compute RSI for FTSE 100 using daily closes (last 1 month of data).
+    Uses Wilder's smoothed RSI method.
+
+    Returns:
+        rsi           : float | None
+        zone          : "overbought" (>70) | "oversold" (<30) | "neutral"
+        signal        : "caution_long" | "caution_short" | "neutral"
+        detail        : human-readable string
+    """
+    ftse_data = market_data.get("FTSE", {})
+    df = ftse_data.get("df")
+
+    base = {
+        "rsi": None,
+        "zone": "unknown",
+        "signal": "neutral",
+        "detail": "RSI FTSE indisponível.",
+    }
+
+    if df is None or len(df) < period + 1:
+        return base
+
+    closes = df["Close"].dropna()
+    if len(closes) < period + 1:
+        return base
+
+    deltas = closes.diff().dropna()
+    gains = deltas.clip(lower=0)
+    losses = (-deltas).clip(lower=0)
+
+    # Wilder smoothing (EWM with alpha = 1/period)
+    avg_gain = gains.ewm(alpha=1 / period, min_periods=period, adjust=False).mean().iloc[-1]
+    avg_loss = losses.ewm(alpha=1 / period, min_periods=period, adjust=False).mean().iloc[-1]
+
+    if avg_loss == 0:
+        rsi = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        rsi = round(100 - (100 / (1 + rs)), 1)
+
+    if rsi >= 70:
+        zone = "overbought"
+        signal = "caution_long"
+        detail = f"RSI {rsi} — FTSE sobrecomprado. Breakout long com menor convicção. Favorecer shorts."
+    elif rsi <= 30:
+        zone = "oversold"
+        signal = "caution_short"
+        detail = f"RSI {rsi} — FTSE sobrevendido. Potencial de bounce. Favorecer longs."
+    elif rsi >= 60:
+        zone = "neutral"
+        signal = "neutral"
+        detail = f"RSI {rsi} — zona neutra-alta. Momentum positivo."
+    elif rsi <= 40:
+        zone = "neutral"
+        signal = "neutral"
+        detail = f"RSI {rsi} — zona neutra-baixa. Momentum negativo."
+    else:
+        zone = "neutral"
+        signal = "neutral"
+        detail = f"RSI {rsi} — zona neutra. Sem extremos."
+
+    return {"rsi": rsi, "zone": zone, "signal": signal, "detail": detail}
+
+
+def compute_asian_session(market_data: dict) -> dict:
+    """
+    Analyse the Asian session overnight performance (Nikkei + Hang Seng).
+    These are the primary drivers of the gap the FTSE opens with.
+
+    Returns:
+        direction  : "risk_on" | "risk_off" | "mixed" | "flat"
+        nikkei_pct : Nikkei % change (last close)
+        hsi_pct    : Hang Seng % change (last close)
+        strength   : "strong" | "moderate" | "weak"
+        score_hint : +1 (risk-on tailwind for FTSE), 0 (mixed/flat), -1 (risk-off headwind)
+        detail     : human-readable string
+    """
+    nikkei_pct = _safe_pct(market_data, "NIKKEI")
+    hsi_pct = _safe_pct(market_data, "HSI")
+
+    base = {
+        "direction": "unknown",
+        "nikkei_pct": nikkei_pct,
+        "hsi_pct": hsi_pct,
+        "strength": "unknown",
+        "score_hint": 0,
+        "detail": "Dados asiáticos indisponíveis.",
+    }
+
+    available = [(v, name) for v, name in [(nikkei_pct, "Nikkei"), (hsi_pct, "HSI")] if v is not None]
+    if not available:
+        return base
+
+    vals = [v for v, _ in available]
+    parts = [f"{name}: {v:+.2f}%" for v, name in available]
+    detail_base = " | ".join(parts)
+
+    positive = sum(1 for v in vals if v > 0.2)
+    negative = sum(1 for v in vals if v < -0.2)
+    strong_positive = sum(1 for v in vals if v > 0.8)
+    strong_negative = sum(1 for v in vals if v < -0.8)
+
+    if positive == len(vals):
+        direction = "risk_on"
+        strength = "strong" if strong_positive == len(vals) else "moderate"
+        hint = 1
+        detail = f"Sessão asiática risk-on — {detail_base}. Tailwind para FTSE."
+    elif negative == len(vals):
+        direction = "risk_off"
+        strength = "strong" if strong_negative == len(vals) else "moderate"
+        hint = -1
+        detail = f"Sessão asiática risk-off — {detail_base}. Headwind para FTSE."
+    elif len(vals) == 1:
+        v = vals[0]
+        if v > 0.5:
+            direction, strength, hint = "risk_on", "moderate", 1
+            detail = f"Sessão asiática levemente positiva — {detail_base}."
+        elif v < -0.5:
+            direction, strength, hint = "risk_off", "moderate", -1
+            detail = f"Sessão asiática levemente negativa — {detail_base}."
+        else:
+            direction, strength, hint = "flat", "weak", 0
+            detail = f"Sessão asiática plana — {detail_base}."
+    else:
+        direction = "mixed"
+        strength = "weak"
+        hint = 0
+        detail = f"Sessão asiática mista — {detail_base}. Sem viés claro."
+
+    return {
+        "direction": direction,
+        "nikkei_pct": nikkei_pct,
+        "hsi_pct": hsi_pct,
+        "strength": strength,
+        "score_hint": hint,
+        "detail": detail,
     }
 
 
@@ -544,10 +692,13 @@ def score_1_macro_events(calendar_data: dict) -> tuple[int, str]:
     return 3, "Dia limpo. Sem eventos de alto impacto relevantes."
 
 
-def score_2_global_sentiment(market_data: dict) -> tuple[int, str]:
+def score_2_global_sentiment(
+    market_data: dict,
+    asian_data: dict | None = None,
+) -> tuple[int, str]:
     """
     2. SENTIMENTO GLOBAL (0–2 pontos)
-       Analise: S&P 500 (futuros), DAX, Euro Stoxx 50
+       Analise: S&P 500 (futuros), DAX, Euro Stoxx 50 + sessão asiática.
        0 = Indefinido / lateral / divergente
        1 = Leve viés
        2 = Forte risk-on ou risk-off (alinhado)
@@ -571,16 +722,29 @@ def score_2_global_sentiment(market_data: dict) -> tuple[int, str]:
     if stoxx is not None:
         detail += f", STOXX50: {stoxx:+.2f}%"
 
-    if strong_positive:
-        return 2, f"Forte risk-on global. {detail}"
-    if strong_negative:
-        return 2, f"Forte risk-off global. {detail}"
-    if all_positive:
-        return 1, f"Leve viés positivo. {detail}"
-    if all_negative:
-        return 1, f"Leve viés negativo. {detail}"
+    # Asian session confirmation / tiebreaker
+    asian_hint = 0
+    asian_str = ""
+    if asian_data and asian_data.get("direction") not in ("unknown", None):
+        asian_hint = asian_data.get("score_hint", 0)
+        asian_str = f" | Ásia: {asian_data.get('detail', '')}"
 
-    return 0, f"Sentimento indefinido/divergente. {detail}"
+    if strong_positive:
+        return 2, f"Forte risk-on global. {detail}{asian_str}"
+    if strong_negative:
+        return 2, f"Forte risk-off global. {detail}{asian_str}"
+    if all_positive:
+        return 1, f"Leve viés positivo. {detail}{asian_str}"
+    if all_negative:
+        return 1, f"Leve viés negativo. {detail}{asian_str}"
+
+    # Divergent Western markets — Asian session breaks the tie
+    if asian_hint == 1:
+        return 1, f"Sentimento ocidental divergente, mas Ásia risk-on. {detail}{asian_str}"
+    if asian_hint == -1:
+        return 1, f"Sentimento ocidental divergente, com Ásia risk-off. {detail}{asian_str}"
+
+    return 0, f"Sentimento indefinido/divergente. {detail}{asian_str}"
 
 
 def score_3_correlations(market_data: dict) -> tuple[int, str]:
@@ -640,10 +804,11 @@ def score_4_volatility(
     vol_data: dict,
     market_data: dict | None = None,
     volume_data: dict | None = None,
+    rsi_data: dict | None = None,
 ) -> tuple[int, str]:
     """
     4. CONDIÇÃO DE VOLATILIDADE (0-2 pontos)
-       Combines ATR regime + Bollinger Squeeze + VIX level + FTSE volume profile.
+       Combines ATR regime + Bollinger Squeeze + VIX + FTSE volume + FTSE RSI.
        0 = Baixa qualidade (fakeouts prováveis / VIX extremo)
        1 = Médio
        2 = Alta probabilidade de expansão / sweet spot
@@ -671,6 +836,21 @@ def score_4_volatility(
         vol_detail = volume_data.get("detail", "")
         vol_hint_str = f" | {vol_detail}"
 
+    # RSI context — overbought/oversold reduces conviction for breakout continuation
+    rsi_penalty = 0
+    rsi_str = ""
+    if rsi_data and rsi_data.get("rsi") is not None:
+        rsi_zone = rsi_data.get("zone", "neutral")
+        rsi_val = rsi_data.get("rsi")
+        if rsi_zone == "overbought":
+            rsi_penalty = -1
+            rsi_str = f" | RSI {rsi_val} — sobrecomprado, cuidado."
+        elif rsi_zone == "oversold":
+            rsi_penalty = -1
+            rsi_str = f" | RSI {rsi_val} — sobrevendido, potencial de bounce."
+        else:
+            rsi_str = f" | RSI {rsi_val}"
+
     if regime == "unknown":
         return 1, f"Dados insuficientes para avaliar volatilidade.{vix_str}"
 
@@ -685,24 +865,24 @@ def score_4_volatility(
     if regime == "expansion":
         base_score = 2
         if vix_level is not None and 15 <= vix_level <= 25:
-            msg = f"Condições ideais: expansão ATR + VIX zona ótima ({vix_level:.1f}). {detail}{squeeze_str}{vol_hint_str}"
+            msg = f"Condições ideais: expansão ATR + VIX zona ótima ({vix_level:.1f}). {detail}{squeeze_str}{vol_hint_str}{rsi_str}"
         else:
-            msg = f"Expansão ATR. Ambiente favorece breakout. {detail}{squeeze_str}{vol_hint_str}"
-        # Volume dry on expansion = slight caution but still expansion
-        return max(1, base_score + min(0, vol_hint)), msg
+            msg = f"Expansão ATR. Ambiente favorece breakout. {detail}{squeeze_str}{vol_hint_str}{rsi_str}"
+        # Volume dry or RSI extreme on expansion = caution
+        return max(1, base_score + min(0, vol_hint) + min(0, rsi_penalty)), msg
 
     if regime == "compression":
         if bb_squeeze is True:
-            return 1, f"Compressão com Bollinger Squeeze — breakout pendente. {detail}{squeeze_str}{vol_hint_str}"
+            return 1, f"Compressão com Bollinger Squeeze — breakout pendente. {detail}{squeeze_str}{vol_hint_str}{rsi_str}"
         # Dry volume + compression = worst case
-        score = max(0, -1 + (1 if vol_hint >= 0 else 0))
-        return score, f"Compressão detectada. Propenso a fakeouts. {detail}{vol_hint_str}"
+        score = max(0, -1 + (1 if vol_hint >= 0 else 0) + (0 if rsi_penalty else 0))
+        return score, f"Compressão detectada. Propenso a fakeouts. {detail}{vol_hint_str}{rsi_str}"
 
-    # Neutral regime — volume hint can shift it
+    # Neutral regime — volume + RSI hints shift it
     if bb_squeeze is True:
-        return 2, f"Squeeze em regime neutro — breakout provável. {detail}{squeeze_str}{vol_hint_str}"
-    base = 1 + vol_hint
-    return max(0, min(2, base)), f"Volatilidade neutra. {detail}{vol_hint_str}"
+        return 2, f"Squeeze em regime neutro — breakout provável. {detail}{squeeze_str}{vol_hint_str}{rsi_str}"
+    base = 1 + vol_hint + min(0, rsi_penalty)
+    return max(0, min(2, base)), f"Volatilidade neutra. {detail}{vol_hint_str}{rsi_str}"
 
 
 def score_5_preopen_structure(
@@ -886,6 +1066,8 @@ def print_full_output(
     vol_data: dict,
     volume_data: dict,
     trend_data: dict,
+    rsi_data: dict,
+    asian_data: dict,
     structure_data: dict,
     show_raw: bool = False,
 ):
@@ -964,11 +1146,31 @@ def print_full_output(
     if bb_squeeze is True:
         print("   Bollinger Squeeze ATIVO — breakout iminente.")
 
+    # RSI
+    rsi_val = rsi_data.get("rsi")
+    rsi_zone = rsi_data.get("zone", "unknown")
+    if rsi_val is not None:
+        marker = " ⚠" if rsi_zone in ("overbought", "oversold") else ""
+        print(f"   RSI FTSE (14d): {rsi_val} [{rsi_zone}]{marker} — {rsi_data.get('detail', '')}")
+
     # Volume
     vol_trend = volume_data.get("volume_trend", "unknown")
     vol_ratio = volume_data.get("volume_spike_ratio")
     if vol_ratio is not None:
         print(f"   Volume FTSE: {vol_trend} ({vol_ratio:.2f}x média) — {volume_data.get('detail', '')}")
+
+    # Asian session
+    a_dir = asian_data.get("direction", "unknown")
+    if a_dir not in ("unknown", None):
+        nk = asian_data.get("nikkei_pct")
+        hs = asian_data.get("hsi_pct")
+        parts = []
+        if nk is not None:
+            parts.append(f"Nikkei {nk:+.2f}%")
+        if hs is not None:
+            parts.append(f"HSI {hs:+.2f}%")
+        asia_str = " | ".join(parts) if parts else "—"
+        print(f"   Sessão Asiática: {a_dir} ({asia_str})")
 
     # Multi-day trend
     t_dir = trend_data.get("direction", "unknown")
@@ -1011,6 +1213,8 @@ def print_full_output(
             "volatility": {k: v for k, v in vol_data.items() if k != "df"},
             "volume": volume_data,
             "trend": trend_data,
+            "rsi": rsi_data,
+            "asian_session": asian_data,
             "structure": structure_data,
             "scores": [
                 {"module": section_names[i], "score": s, "detail": d}
@@ -1034,6 +1238,8 @@ def output_json(
     vol_data: dict,
     volume_data: dict,
     trend_data: dict,
+    rsi_data: dict,
+    asian_data: dict,
     structure_data: dict,
 ):
     """Output the analysis as a JSON object."""
@@ -1067,6 +1273,12 @@ def output_json(
         },
         "trend": {
             k: v for k, v in trend_data.items()
+        },
+        "rsi": {
+            k: v for k, v in rsi_data.items()
+        },
+        "asian_session": {
+            k: v for k, v in asian_data.items()
         },
         "calendar": {
             "high_impact_count": calendar_data["total_high"],
@@ -1116,10 +1328,12 @@ def run_analysis(show_raw: bool = False, output_format: str = "text") -> dict:
     market_data = fetch_market_data()
 
     if output_format == "text":
-        print("  [3/3] Volatilidade, volume e estrutura pré-abertura...")
+        print("  [3/3] Volatilidade, volume, RSI, sessão asiática e estrutura pré-abertura...")
     vol_data = compute_ftse_volatility(market_data)
     volume_data = compute_ftse_volume_profile(market_data)
     trend_data = compute_multiday_trend(market_data)
+    rsi_data = compute_ftse_rsi(market_data)
+    asian_data = compute_asian_session(market_data)
     structure_data = compute_preopen_structure(market_data)
 
     if output_format == "text":
@@ -1127,9 +1341,9 @@ def run_analysis(show_raw: bool = False, output_format: str = "text") -> dict:
 
     # 2. Score all 5 modules
     s1 = score_1_macro_events(calendar_data)
-    s2 = score_2_global_sentiment(market_data)
+    s2 = score_2_global_sentiment(market_data, asian_data)
     s3 = score_3_correlations(market_data)
-    s4 = score_4_volatility(vol_data, market_data, volume_data)
+    s4 = score_4_volatility(vol_data, market_data, volume_data, rsi_data)
     s5 = score_5_preopen_structure(structure_data, trend_data)
 
     scores = [s1, s2, s3, s4, s5]
@@ -1146,12 +1360,12 @@ def run_analysis(show_raw: bool = False, output_format: str = "text") -> dict:
     if output_format == "json":
         output_json(
             scores, total_score, classification, direction, summary,
-            calendar_data, market_data, vol_data, volume_data, trend_data, structure_data,
+            calendar_data, market_data, vol_data, volume_data, trend_data, rsi_data, asian_data, structure_data,
         )
     else:
         print_full_output(
             scores, total_score, classification, direction, summary,
-            calendar_data, market_data, vol_data, volume_data, trend_data, structure_data,
+            calendar_data, market_data, vol_data, volume_data, trend_data, rsi_data, asian_data, structure_data,
             show_raw=show_raw,
         )
 
@@ -1170,6 +1384,31 @@ def run_analysis(show_raw: bool = False, output_format: str = "text") -> dict:
     except Exception:
         pass  # non-critical
 
+    # 7. Append to session log (accuracy tracking over time)
+    log_entry = {
+        "timestamp": now.isoformat(),
+        "score": total_score,
+        "max_score": 11,
+        "classification": classification,
+        "direction": direction,
+        "modules": {
+            "macro": scores[0][0],
+            "sentiment": scores[1][0],
+            "correlations": scores[2][0],
+            "volatility": scores[3][0],
+            "structure": scores[4][0],
+        },
+        "rsi": rsi_data.get("rsi"),
+        "asian_direction": asian_data.get("direction"),
+        "volume_trend": volume_data.get("volume_trend"),
+        "trend_direction": trend_data.get("direction"),
+    }
+    try:
+        with open(ANALYSIS_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # non-critical
+
     return result
 
 
@@ -1179,9 +1418,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python uk100_orb_filter.py          # Full analysis
-  python uk100_orb_filter.py --raw    # Analysis + raw data debug
-  python uk100_orb_filter.py --json   # Output as JSON
+  python uk100_orb_filter.py             # Full analysis
+  python uk100_orb_filter.py --raw       # Analysis + raw data debug
+  python uk100_orb_filter.py --json      # Output as JSON
+  python uk100_orb_filter.py --history   # Show last 10 analysis entries
+  python uk100_orb_filter.py --history 20  # Show last 20 entries
         """,
     )
     parser.add_argument(
@@ -1192,10 +1433,56 @@ Examples:
         "--json", action="store_true",
         help="Output result as JSON (machine-readable)",
     )
+    parser.add_argument(
+        "--history", nargs="?", const=10, type=int, metavar="N",
+        help="Show last N entries from the session log (default: 10)",
+    )
     args = parser.parse_args()
+
+    if args.history is not None:
+        _print_history(args.history)
+        return
 
     output_format = "json" if args.json else "text"
     run_analysis(show_raw=args.raw, output_format=output_format)
+
+
+def _print_history(n: int = 10):
+    """Print the last N entries from analysis_log.jsonl."""
+    if not ANALYSIS_LOG_FILE.exists():
+        print("Nenhum histórico encontrado. Execute a ferramenta primeiro.")
+        return
+
+    try:
+        lines = ANALYSIS_LOG_FILE.read_text(encoding="utf-8").strip().splitlines()
+    except Exception as e:
+        print(f"Erro ao ler histórico: {e}")
+        return
+
+    entries = []
+    for line in lines:
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            pass
+
+    entries = entries[-n:]
+
+    print()
+    print("=" * 64)
+    print(f"   HISTÓRICO DE ANÁLISES — últimas {len(entries)} entradas")
+    print("=" * 64)
+    for e in entries:
+        ts = e.get("timestamp", "?")[:16].replace("T", " ")
+        score = e.get("score", "?")
+        cls = e.get("classification", "?")
+        direction = e.get("direction", "?")
+        asian = e.get("asian_direction", "?")
+        rsi = e.get("rsi")
+        rsi_str = f"  RSI:{rsi}" if rsi is not None else ""
+        print(f"  {ts}  {score:>2}/11  {cls:<22}  {direction:<8}  Ásia:{asian}{rsi_str}")
+    print("=" * 64)
+    print()
 
 
 if __name__ == "__main__":
