@@ -6,59 +6,57 @@ Corre antes da abertura de Londres (~07:15 UK time), busca **dados reais de merc
 
 ---
 
-## ⚡ Instalação Rápida (copy-paste no terminal)
+## ⚡ Instalação (Windows)
 
-> **Requisitos:** Python 3.10+ e Git. Funciona em Linux, macOS e Windows (WSL).
+### Pré-requisitos (só uma vez)
 
-### 1. Clonar e instalar
+1. **Git** — [Descarrega aqui](https://git-scm.com/download/win) → instala com as opções padrão
+2. **Python 3.10+** — [Descarrega aqui](https://www.python.org/downloads/) → **IMPORTANTE: marca a checkbox "Add Python to PATH"** durante a instalação
 
-```bash
-git clone https://github.com/hallosoares/pedeanjo.git
-cd pedeanjo
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
+### Instalar (copy-paste no PowerShell)
+
+Abre o **PowerShell** (clica direito no botão Windows → "Terminal" ou "PowerShell") e cola isto tudo de uma vez:
+
+```powershell
+cd "$HOME\Desktop"; git clone https://github.com/hallosoares/pedeanjo.git; cd pedeanjo; python -m venv venv; venv\Scripts\pip install -r requirements.txt; copy pedeanjo_go.bat "$HOME\Desktop\pedeanjo_go.bat"; venv\Scripts\python uk100_orb_filter.py
 ```
 
-### 2. Criar o comando `pedeanjo_go` (funciona de qualquer pasta)
+Isto vai:
+- ✅ Criar a pasta `pedeanjo` no teu Desktop
+- ✅ Instalar tudo automaticamente
+- ✅ Copiar o atalho `pedeanjo_go.bat` para o Desktop
+- ✅ Correr a primeira análise
 
-```bash
-chmod +x pedeanjo_go
-mkdir -p ~/.local/bin
-ln -sf "$(pwd)/pedeanjo_go" ~/.local/bin/pedeanjo_go
+### Usar todos os dias
+
+**Opção A** — Faz duplo-clique em `pedeanjo_go.bat` no Desktop.
+
+**Opção B** — Abre o PowerShell e escreve:
+
+```powershell
+cd "$HOME\Desktop\pedeanjo"; venv\Scripts\python uk100_orb_filter.py
 ```
-
-Se `~/.local/bin` não estiver no teu PATH, adiciona esta linha ao teu `~/.bashrc` (ou `~/.zshrc`):
-
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-### 3. Testar
-
-```bash
-pedeanjo_go
-```
-
-É só isto. A partir de agora, abres o terminal e escreves `pedeanjo_go` antes da abertura de Londres.
 
 ---
 
-## 🚀 Como usar
+## ⚡ Instalação (Linux / macOS)
 
 ```bash
-pedeanjo_go                  # Análise completa (usa isto todos os dias)
-pedeanjo_go --json           # Output em JSON (para integração com outros tools)
-pedeanjo_go --history        # Ver histórico das últimas 10 análises
-pedeanjo_go --history 20     # Ver histórico das últimas 20 análises
-pedeanjo_go --raw            # Mostra raw data no final (debug)
+cd ~/Desktop && git clone https://github.com/hallosoares/pedeanjo.git && cd pedeanjo && python3 -m venv venv && venv/bin/pip install -r requirements.txt && chmod +x pedeanjo_go && mkdir -p ~/.local/bin && ln -sf "$(pwd)/pedeanjo_go" ~/.local/bin/pedeanjo_go && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc && pedeanjo_go
 ```
 
-Ou, se preferires correr diretamente sem o atalho:
+Depois é só escrever `pedeanjo_go` em qualquer terminal.
 
-```bash
-cd pedeanjo
-venv/bin/python uk100_orb_filter.py
+---
+
+## �� Opções
+
+```
+pedeanjo_go                  # Análise completa (usa isto todos os dias)
+pedeanjo_go --json           # Output em JSON
+pedeanjo_go --history        # Ver últimas 10 análises
+pedeanjo_go --history 20     # Ver últimas 20 análises
+pedeanjo_go --raw            # Mostra raw data (debug)
 ```
 
 ---
@@ -81,7 +79,7 @@ venv/bin/python uk100_orb_filter.py
 |-------|--------------|-------------|
 | 10-14 | 🟢 **DIA FAVORÁVEL** | Operar ORB com confiança |
 | 6-9 | 🟡 **OPERAR COM CAUTELA** | Reduzir tamanho, stops mais apertados |
-| 0-5 | 🔴 **NÃO OPERAR** | Ficar de fora |
+| 0-5 | �� **NÃO OPERAR** | Ficar de fora |
 
 ---
 
@@ -90,7 +88,7 @@ venv/bin/python uk100_orb_filter.py
 ```
 ================================================================
    UK100 ORB PRE-OPEN INSTITUTIONAL FILTER
-   Wednesday, 01 April 2026 — 07:15:02 (local)
+   Thursday, 02 April 2026 — 07:15:02 (local)
 ================================================================
 
   1. EVENTOS E RISCO MACRO
@@ -131,53 +129,19 @@ venv/bin/python uk100_orb_filter.py
 
 Todos os dados são buscados **ao vivo** (yfinance + ForexFactory). Sem API keys. Sem custos.
 
-| Sinal | Fonte | Porquê |
-|-------|-------|--------|
-| S&P 500 futures, DAX, Euro Stoxx 50 | yfinance | Sentimento global antes do FTSE abrir |
-| Nikkei 225, Hang Seng | yfinance | Sessão asiática — driver do gap de abertura |
-| Crude Oil, Gold, GBP/USD | yfinance | Correlações macro — confirmam direção |
-| ATR + Bollinger Squeeze | Calculado | Regime de volatilidade — expansão vs compressão |
-| VIX | yfinance | Nível de medo — 15-25 ideal, >30 perigo |
-| RSI 14 dias FTSE | Calculado | Sobrecomprado/sobrevendido antes do open |
-| Volume FTSE | yfinance | Spike institucional vs volume seco |
-| VIX Term Structure | yfinance (^VIX vs ^VIX3M) | Contango (calmo) vs backwardation (pânico) |
-| Yield Curve US 2Y/10Y | yfinance (^TNX vs 2YY=F) | Inversão = sinal de recessão |
-| Divergência Intermercados | Calculado (FTSE vs DAX/SPX) | Deteta dislocações multi-day |
-| Sazonalidade + Força GBP | Calculado | Dia da semana + GBP vs basket (USD, JPY, CHF, EUR) |
-
----
-
-## 🆚 Porquê isto em vez de perguntar ao ChatGPT?
-
-| | Esta ferramenta | Perguntar ao ChatGPT/Grok |
-|---|---|---|
-| **Dados** | Busca dados REAIS em tempo real | O LLM inventa ou usa dados antigos |
-| **VIX** | Valor actual com análise de zona | Não sabe o VIX de hoje |
-| **Sessão Asiática** | Nikkei + HSI overnight reais | Não sabe o que aconteceu esta noite |
-| **Calendário** | ForexFactory com impacto e hora | Pode alucinar eventos |
-| **Consistência** | Mesmas regras, mesmo input = mesmo output | Respostas diferentes cada vez |
-| **Velocidade** | ~15 segundos | Abrir browser, colar prompt, esperar... |
-| **Histórico** | `analysis_log.jsonl` regista tudo | Sem memória de sessões anteriores |
-
----
-
-## 📁 Estrutura do Projeto
-
-```
-pedeanjo/
-  uk100_orb_filter.py        # Ferramenta principal (6 módulos de scoring)
-  signals/                   # Sinais avançados (módulos independentes)
-    __init__.py
-    vix_term_structure.py    # VIX contango/backwardation
-    bond_yield_curve.py      # US 2Y/10Y spread
-    intermarket_divergence.py # FTSE vs DAX/SPX divergência
-    seasonality.py           # Padrões ORB por dia da semana
-    currency_strength.py     # GBP vs basket (USD, JPY, CHF, EUR)
-  pedeanjo_go                # Shell launcher (funciona de qualquer pasta)
-  requirements.txt           # Dependências Python
-  analysis_log.jsonl         # Histórico de análises (auto-gerado)
-  README.md
-```
+| Sinal | Fonte |
+|-------|-------|
+| S&P 500 futures, DAX, Euro Stoxx 50 | Sentimento global antes do FTSE abrir |
+| Nikkei 225, Hang Seng | Sessão asiática — driver do gap de abertura |
+| Crude Oil, Gold, GBP/USD | Correlações macro — confirmam direção |
+| ATR + Bollinger Squeeze | Regime de volatilidade — expansão vs compressão |
+| VIX + VIX Term Structure | Nível de medo + contango vs backwardation |
+| RSI 14 dias FTSE | Sobrecomprado/sobrevendido antes do open |
+| Volume FTSE | Spike institucional vs volume seco |
+| Yield Curve US 2Y/10Y | Inversão = sinal de recessão |
+| Divergência Intermercados | FTSE vs DAX/SPX — deteta dislocações |
+| Sazonalidade | Padrões ORB por dia da semana |
+| Força GBP vs basket | GBP vs USD, JPY, CHF, EUR |
 
 ---
 
@@ -185,10 +149,14 @@ pedeanjo/
 
 Quando houver uma versão nova:
 
+**Windows (PowerShell):**
+```powershell
+cd "$HOME\Desktop\pedeanjo"; git pull; venv\Scripts\pip install -r requirements.txt
+```
+
+**Linux/macOS:**
 ```bash
-cd pedeanjo
-git pull
-venv/bin/pip install -r requirements.txt
+cd ~/Desktop/pedeanjo && git pull && venv/bin/pip install -r requirements.txt
 ```
 
 ---
