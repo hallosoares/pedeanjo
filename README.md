@@ -6,7 +6,7 @@ Corre antes da abertura de Londres (~07:15 UK time), busca dados reais de mercad
 
 ---
 
-## O que faz
+## O que esse treco faz ??
 
 - Busca **dados reais em tempo real** (8 tickers: S&P 500 futures, DAX, Euro Stoxx 50, Crude Oil, Gold, GBP/USD, FTSE 100, VIX)
 - Busca o **calendário económico ForexFactory** (notícias de alto/médio impacto — GBP, USD, EUR)
@@ -48,7 +48,7 @@ Requisitos: **Python 3.10+** (testado com 3.12). Funciona em Linux, macOS e Wind
 ## Como usar
 
 ```bash
-# Modo principal — rule-based scoring (instantâneo, ~10 segundos)
+# Análise completa
 python uk100_orb_filter.py
 
 # Ou com o atalho (de qualquer pasta):
@@ -99,33 +99,14 @@ pedeanjo_go --json
 
 ---
 
-## Modo Ollama (opcional — avançado)
-
-Se tiveres [Ollama](https://ollama.com) instalado localmente, podes usar o modo LLM que envia os mesmos dados reais para um modelo de linguagem local:
-
-```bash
-# Instalar dependência extra
-venv/bin/pip install ollama
-
-# Instalar Ollama + modelo (ex: llama3.1:8b)
-# Ver: https://ollama.com/download
-ollama pull llama3.1:8b
-
-# Usar
-pedeanjo_go --ollama
-pedeanjo_go --ollama --model mistral:7b-instruct-q4_K_M
-```
-
-O modo Ollama NÃO é necessário. O scoring rule-based é a ferramenta principal e é mais rápido e determinístico.
-
----
-
 ## Porquê esta ferramenta em vez de colar o prompt no ChatGPT?
 
 | | Esta ferramenta | Colar prompt no ChatGPT/Grok |
 |---|---|---|
 | **Dados** | Busca dados REAIS em tempo real (yfinance + ForexFactory) | O LLM não tem acesso a dados live — inventa ou usa dados antigos |
 | **VIX** | Valor actual do VIX com análise de zona (15-25 ideal, >30 perigo) | O LLM não sabe o VIX de hoje |
+| **Volume FTSE** | Ratio volume/média 5 dias — detecta spike institucional ou volume seco | O LLM não tem acesso a dados de volume |
+| **Tendência multi-day** | 5-10 dias de closes reais, consistência e momentum calculados | O LLM "adivinha" a tendência |
 | **Volatilidade** | ATR calculado + Bollinger Squeeze real | O LLM "adivinha" se há volatilidade |
 | **Calendário** | ForexFactory com impacto, hora, país — filtrado automaticamente | O LLM pode alucinar eventos que não existem |
 | **Consistência** | Regras fixas, mesmo input = mesmo output | O LLM dá respostas diferentes cada vez |

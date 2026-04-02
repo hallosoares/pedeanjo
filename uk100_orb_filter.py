@@ -2,54 +2,33 @@
 """
 UK100 ORB Pre-Open Institutional Filter
 =========================================================
-Run this before the London open (~07:15 UK time) to get a scored
+Run before the London open (~07:15 UK time) to get a scored
 pre-open analysis for the FTSE 100 Opening Range Breakout strategy.
 
 Usage:
-    python uk100_orb_filter.py                    # rule-based (instant)
-    python uk100_orb_filter.py --raw              # also print raw fetched data
-    python uk100_orb_filter.py --json             # output as JSON
-    python uk100_orb_filter.py --help             # show help
-
-    # Optional (requires Ollama installed locally — see README):
-    python uk100_orb_filter.py --ollama           # LLM institutional analysis
-    python uk100_orb_filter.py --ollama --model mistral:7b-instruct-q4_K_M
-
-Modes:
-    Default   : Rule-based scoring (fast, deterministic, ~10 seconds)
-                Fetches REAL live data, scores 5 modules, outputs in Portuguese.
-                This is the main mode — no extra software needed.
-    --ollama  : (OPTIONAL) Sends the same real data to a local Ollama LLM for
-                a narrative institutional analysis. Requires Ollama installed.
+    python uk100_orb_filter.py          # full analysis (default)
+    python uk100_orb_filter.py --raw    # also print raw fetched data
+    python uk100_orb_filter.py --json   # output as JSON
+    python uk100_orb_filter.py --help   # show help
 
 Data sources (all free, no API keys):
-    - yfinance   : Futures, FX, FTSE prices, ATR/volatility, VIX
-    - ForexFactory (faireconomy.media) : Economic calendar with impact levels
-    - pandas_ta  : Bollinger Bands / Keltner Channel squeeze detection
-    - Ollama (OPTIONAL, local LLM) : Institutional-grade narrative in Portuguese
+    - yfinance        : Futures, FX, FTSE prices, ATR, volume, VIX
+    - ForexFactory    : Economic calendar with impact levels (cached locally)
+    - pandas_ta       : Bollinger Bands / Keltner Channel squeeze detection
 
 Author : fesimon (pedeanjo)
-Version: 3.0.0 (CLI — rule-based + Ollama LLM scoring + VIX + BB squeeze)
+Version: 4.0.0
 """
 
 import argparse
 import json
-import re
-import sys
-import time as _time_module
+import time as _time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import requests
 import yfinance as yf
-
-try:
-    import ollama as _ollama_lib
-    OLLAMA_AVAILABLE = True
-except ImportError:
-    OLLAMA_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -86,437 +65,6 @@ HISTORY_DAYS = "1mo"  # enough for ATR calculation
 CALENDAR_CACHE_FILE = Path(__file__).parent / ".calendar_cache.json"
 CALENDAR_CACHE_TTL_MIN = 30  # minutes
 
-# Default Ollama model (can be overridden with --model)
-DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
-
-# ---------------------------------------------------------------------------
-# BROTHER'S EXACT PROMPT (Portuguese — institutional trader tone)
-# ---------------------------------------------------------------------------
-
-BROTHER_PROMPT = """Atue como um trader institucional especialista em índices europeus, com foco no FTSE 100 Index (UK100), combinando macroeconomia, fluxo global e correlações intermarket.
-
-Preciso que você avalie o cenário de HOJE poucos minutos antes da abertura da sessão de Londres para validar se minha estratégia de opening range breakout (M5, primeiros 20 minutos) tem probabilidade de continuidade ou risco elevado de fakeout.
-
-⚠️ Seu objetivo principal é FILTRAR o dia — não é forçar trade.
-
-1. EVENTOS E RISCO MACRO (0–2 pontos)
-Há notícias de alto impacto hoje? (United Kingdom, United States, Eurozone)
-Estão próximas da abertura de Londres?
-
-Pontuação: 0 = Alto risco / notícias iminentes → EVITAR operar
-1 = Risco moderado
-2 = Dia limpo / sem eventos relevantes
-
-2. SENTIMENTO GLOBAL (0–2 pontos)
-Analise: S&P 500 (futuros), DAX, Euro Stoxx 50
-
-Pontuação: 0 = Indefinido / lateral / divergente
-1 = Leve viés
-2 = Forte risk-on ou risk-off (alinhado)
-
-3. CORRELAÇÕES CHAVE (0–2 pontos)
-Avalie direção e coerência: Crude Oil, GBP/USD, Gold
-
-Pontuação: 0 = Confuso / divergente
-1 = Parcialmente alinhado
-2 = Alinhamento claro com direção do índice
-
-4. CONDIÇÃO DE VOLATILIDADE (0–2 pontos)
-Ambiente favorece expansão (bom para breakout)? Ou compressão / manipulação (propenso a fakeout)?
-
-Pontuação: 0 = Baixa qualidade (fakeouts prováveis)
-1 = Médio
-2 = Alta probabilidade de expansão
-
-5. ESTRUTURA PRÉ-ABERTURA (0–2 pontos)
-Mercado já está estendido antes da abertura? Ou bem posicionado para gerar movimento novo?
-
-Pontuação: 0 = Esticado / exausto
-1 = Neutro
-2 = Bem posicionado para rompimento limpo
-
-🔢 SCORE FINAL (0–10)
-Some tudo e classifique:
-0–3 → ❌ NÃO OPERAR (alto risco de fakeout)
-4–6 → ⚠️ OPERAR COM CAUTELA (reduzir risco)
-7–10 → ✅ DIA FAVORÁVEL (buscar rompimento)
-
-🎯 DIREÇÃO (OBRIGATÓRIO)
-Escolha apenas UMA: COMPRADO / VENDIDO / NÃO OPERAR
-
-📊 RESPOSTA FINAL (FORMATO FIXO — OBRIGATÓRIO seguir exatamente)
-Score: X/10
-Classificação: (Não operar / Cautela / Favorável)
-Direção: (Comprado / Vendido / Não operar)
-
-Resumo (máx. 5 linhas):
-(Apenas o essencial que justifica a decisão)
-
-⚠️ Regras importantes:
-- Seja direto e objetivo (nível mesa institucional)
-- Evite respostas neutras
-- Se houver notícia relevante próxima → priorize NÃO OPERAR
-- Foque em evitar fakeouts, não em gerar trades"""
-
-
-# ---------------------------------------------------------------------------
-# OLLAMA LLM INTEGRATION
-# ---------------------------------------------------------------------------
-
-def _build_data_block(calendar_data: dict, market_data: dict,
-                      vol_data: dict, structure_data: dict) -> str:
-    """
-    Build a clean, structured text block of ALL real fetched data
-    to inject into the LLM prompt.  No fake data, no placeholders.
-    """
-    lines = []
-    now = datetime.now()
-    lines.append(f"Data/Hora: {now.strftime('%A, %d %B %Y — %H:%M UTC')}")
-    lines.append("")
-
-    # --- Calendar events ---
-    lines.append("=== CALENDÁRIO ECONÓMICO (dados reais ForexFactory) ===")
-    if calendar_data.get("calendar_unavailable"):
-        lines.append("Calendário indisponível no momento.")
-    else:
-        if calendar_data["has_near_open_high"]:
-            lines.append("EVENTOS DE ALTO IMPACTO PERTO DA ABERTURA DE LONDRES:")
-            for ev in calendar_data["near_open_high_impact"]:
-                lines.append(f"  • {ev['time_utc']} — {ev['title']} ({ev['country']})")
-                if ev.get('forecast'):
-                    lines.append(f"    Forecast: {ev['forecast']}  |  Previous: {ev.get('previous', 'N/A')}")
-        elif calendar_data["has_high_impact"]:
-            lines.append("Eventos de alto impacto hoje (mas FORA da janela de abertura):")
-            for ev in calendar_data["high_impact_events"]:
-                lines.append(f"  • {ev['time_utc']} — {ev['title']} ({ev['country']})")
-        else:
-            lines.append(f"Sem eventos de alto impacto. {calendar_data['total_medium']} eventos de médio impacto.")
-
-        if calendar_data.get("medium_impact_events"):
-            lines.append(f"\nEventos de médio impacto ({calendar_data['total_medium']}):")
-            for ev in calendar_data["medium_impact_events"][:5]:
-                lines.append(f"  • {ev['time_utc']} — {ev['title']} ({ev['country']})")
-    lines.append("")
-
-    # --- Market data ---
-    lines.append("=== DADOS DE MERCADO (preços reais yfinance) ===")
-    display_names = {
-        "SPX_futures": "S&P 500 Futures (ES=F)",
-        "DAX": "DAX (^GDAXI)",
-        "STOXX50": "Euro Stoxx 50 (^STOXX50E)",
-        "OIL": "Crude Oil WTI (CL=F)",
-        "GOLD": "Gold (GC=F)",
-        "GBPUSD": "GBP/USD",
-        "FTSE": "FTSE 100 (^FTSE)",
-        "VIX": "CBOE VIX (^VIX)",
-    }
-    for name in ["SPX_futures", "DAX", "STOXX50", "OIL", "GOLD", "GBPUSD", "FTSE", "VIX"]:
-        data = market_data.get(name, {})
-        pct = data.get("pct_change")
-        last = data.get("last_close")
-        label = display_names.get(name, name)
-        if pct is not None and last is not None:
-            arrow = "+" if pct > 0 else ("-" if pct < 0 else "=")
-            lines.append(f"  {label}: {last:.2f}  {arrow} {pct:+.2f}%")
-        else:
-            lines.append(f"  {label}: dados indisponíveis")
-    lines.append("")
-
-    # --- Volatility ---
-    lines.append("=== VOLATILIDADE FTSE 100 ===")
-    regime = vol_data.get("vol_regime", "unknown")
-    atr = vol_data.get("current_atr", "N/A")
-    avg = vol_data.get("avg_atr", "N/A")
-    ratio = vol_data.get("atr_ratio", "N/A")
-    lines.append(f"  Regime: {regime}")
-    lines.append(f"  ATR atual: {atr}  |  ATR médio: {avg}  |  Ratio: {ratio}")
-    if regime == "expansion":
-        lines.append("  → Ambiente favorece expansão/breakout.")
-    elif regime == "compression":
-        lines.append("  → Compressão detectada — cuidado com fakeouts.")
-    # VIX
-    vix_data = market_data.get("VIX", {})
-    vix_last = vix_data.get("last_close")
-    if vix_last is not None:
-        lines.append(f"  VIX: {vix_last:.2f}")
-        if vix_last > 25:
-            lines.append("  → VIX elevado — alta volatilidade implícita, ranges amplos mas mais fakeouts.")
-        elif vix_last < 15:
-            lines.append("  → VIX baixo — mercado complacente, ranges apertados, ORB mais difícil.")
-        else:
-            lines.append("  → VIX em zona ótima para ORB (15-25).")
-    # Bollinger Squeeze
-    bb_squeeze = vol_data.get("bb_squeeze")
-    if bb_squeeze is not None:
-        if bb_squeeze:
-            lines.append("  Bollinger Squeeze ATIVO — compressão extrema, breakout iminente.")
-        else:
-            lines.append("  Sem squeeze ativo.")
-    lines.append("")
-
-    # --- Pre-open structure ---
-    lines.append("=== ESTRUTURA PRÉ-ABERTURA ===")
-    if structure_data.get("is_extended"):
-        moves = ", ".join(structure_data.get("big_moves", []))
-        lines.append(f"   Mercado ESTICADO antes da abertura. Movimentos grandes: {moves}")
-    else:
-        ftse_gap = structure_data.get("ftse_gap_pct")
-        if ftse_gap is not None:
-            lines.append(f"  Estrutura limpa. FTSE gap: {ftse_gap:+.2f}%")
-        else:
-            lines.append("  Estrutura neutra. Gap não disponível.")
-    lines.append("")
-
-    return "\n".join(lines)
-
-
-def ollama_scoring(calendar_data: dict, market_data: dict,
-                   vol_data: dict, structure_data: dict,
-                   model: str = DEFAULT_OLLAMA_MODEL) -> dict | None:
-    """
-    Send REAL live data + brother's exact prompt to local Ollama.
-    Parses the LLM response to extract Score, Classificação, Direção, Resumo.
-    Returns dict with all parsed fields + the full raw LLM response.
-    """
-    if not OLLAMA_AVAILABLE:
-        print("   Pacote 'ollama' não instalado. Execute: pip install ollama")
-        return None
-
-    data_block = _build_data_block(calendar_data, market_data, vol_data, structure_data)
-
-    full_message = (
-        f"{BROTHER_PROMPT}\n\n"
-        f"\n"
-        f"DADOS BRUTOS ATUALIZADOS (reais, coletados agora, Londres pre-open):\n"
-        f"\n\n"
-        f"{data_block}\n\n"
-        f"Com base EXCLUSIVAMENTE nos dados acima, forneça sua análise "
-        f"no FORMATO FIXO exigido. Seja preciso e institucional."
-    )
-
-    print(f"  A enviar dados reais para Ollama ({model})...")
-    print(f"  Isto pode demorar 30-90 segundos dependendo do modelo...")
-
-    start_time = _time_module.time()
-    try:
-        response = _ollama_lib.chat(
-            model=model,
-            messages=[{"role": "user", "content": full_message}],
-            options={
-                "temperature": 0.3,      # Low temp for precise output
-                "num_predict": 1024,     # Enough for the full response
-                "top_p": 0.9,
-            },
-        )
-        elapsed = _time_module.time() - start_time
-        content = response.message.content
-        print(f"   Resposta recebida em {elapsed:.1f}s")
-    except Exception as e:
-        print(f"   Erro Ollama: {e}")
-        print(f"   Verifique se o servidor Ollama está rodando (ollama serve)")
-        print(f"   Verifique se o modelo está instalado (ollama pull {model})")
-        return None
-
-    result = _parse_ollama_response(content)
-    result["raw_llm_response"] = content
-    result["model"] = model
-    result["response_time_s"] = round(elapsed, 1)
-    return result
-
-
-def _parse_ollama_response(content: str) -> dict:
-    """
-    Parse the LLM's response to extract Score, Classificação, Direção, Resumo.
-    Handles variations in formatting gracefully.
-    """
-    result = {
-        "score": None,
-        "classification": None,
-        "direction": None,
-        "summary": None,
-    }
-
-    lines = content.strip().split("\n")
-
-    for line in lines:
-        line_clean = line.strip()
-        # Strip markdown bold markers
-        line_clean = re.sub(r'\*\*', '', line_clean)
-
-        # Score: X/10
-        if result["score"] is None:
-            score_match = re.search(r'[Ss]core[:\s]+\s*(\d{1,2})\s*/\s*10', line_clean)
-            if score_match:
-                result["score"] = int(score_match.group(1))
-
-        # Classificação
-        if result["classification"] is None:
-            class_match = re.search(
-                r'[Cc]lassifica[çc][ãa]o[:\s]+\s*(.+)',
-                line_clean
-            )
-            if class_match:
-                raw_class = class_match.group(1).strip()
-                raw_lower = raw_class.lower()
-                if "não operar" in raw_lower or "nao operar" in raw_lower:
-                    result["classification"] = "NÃO OPERAR"
-                elif "cautela" in raw_lower:
-                    result["classification"] = "OPERAR COM CAUTELA"
-                elif "favorável" in raw_lower or "favoravel" in raw_lower:
-                    result["classification"] = "DIA FAVORÁVEL"
-                else:
-                    result["classification"] = raw_class
-
-        # Direção
-        if result["direction"] is None:
-            dir_match = re.search(
-                r'[Dd]ire[çc][ãa]o[:\s]+\s*(.+)',
-                line_clean
-            )
-            if dir_match:
-                raw_dir = dir_match.group(1).strip()
-                raw_dir_lower = raw_dir.lower()
-                if "comprado" in raw_dir_lower:
-                    result["direction"] = "COMPRADO"
-                elif "vendido" in raw_dir_lower:
-                    result["direction"] = "VENDIDO"
-                elif "não operar" in raw_dir_lower or "nao operar" in raw_dir_lower:
-                    result["direction"] = "NÃO OPERAR"
-                else:
-                    result["direction"] = raw_dir.upper()
-
-    # Extract Resumo — everything after "Resumo" line
-    resumo_lines = []
-    in_resumo = False
-    for line in lines:
-        line_clean = line.strip()
-        # Strip markdown bold markers for matching
-        line_stripped = re.sub(r'\*\*', '', line_clean).strip()
-        if re.search(r'[Rr]esumo', line_stripped) and not in_resumo:
-            in_resumo = True
-            after = re.sub(r'.*[Rr]esumo[^:]*:\s*', '', line_stripped)
-            if after and after != line_stripped:
-                resumo_lines.append(after)
-            continue
-        if in_resumo and line_stripped:
-            if re.match(r'^(Score|Classifica|Dire[çc]|Justificativa)', line_stripped):
-                break
-            # Skip lines that are just the prompt's rules echoed back
-            if re.match(r'^(Regras|Seja direto|Evite respostas|Se houver|Foque em)', line_stripped):
-                break
-            # Strip leading bullet chars and markdown bold markers
-            cleaned = re.sub(r'^[-•*]\s*', '', line_stripped)
-            cleaned = cleaned.strip()
-            if cleaned:
-                resumo_lines.append(cleaned)
-
-    if resumo_lines:
-        result["summary"] = "\n".join(resumo_lines[:5])
-
-    # Fallback: if score parsing failed, try broader pattern
-    if result["score"] is None:
-        score_match = re.search(r'(\d{1,2})\s*/\s*10', content)
-        if score_match:
-            result["score"] = int(score_match.group(1))
-
-    return result
-
-
-def print_ollama_output(ollama_result: dict, calendar_data: dict,
-                        market_data: dict, vol_data: dict,
-                        structure_data: dict, show_raw: bool = False):
-    """
-    Print the Ollama analysis in a beautiful terminal format.
-    """
-    now = datetime.now()
-
-    print()
-    print("=" * 64)
-    print("   UK100 ORB PRE-OPEN INSTITUTIONAL FILTER")
-    print(f"   {now.strftime('%A, %d %B %Y')} — {now.strftime('%H:%M:%S')} (local)")
-    print(f"   Powered by Ollama ({ollama_result.get('model', '?')})")
-    print(f"   Response time: {ollama_result.get('response_time_s', '?')}s")
-    print("=" * 64)
-    print()
-
-    score = ollama_result.get("score", "?")
-    classification = ollama_result.get("classification", "?")
-    direction = ollama_result.get("direction", "?")
-    summary = ollama_result.get("summary", "(sem resumo)")
-
-    print(f"   Score: {score}/11")
-    print(f"   Classificação: {classification}")
-    print(f"   Direção: {direction}")
-    print()
-    print("   Resumo:")
-    if summary:
-        for line in summary.split("\n"):
-            print(f"     - {line}")
-    print()
-    print("-" * 64)
-
-    # Market snapshot
-    print()
-    print("   SNAPSHOT DOS MERCADOS (dados reais):")
-    display_names = {
-        "SPX_futures": "S&P 500 fut",
-        "DAX": "DAX",
-        "STOXX50": "Euro Stoxx",
-        "OIL": "Crude Oil",
-        "GOLD": "Gold",
-        "GBPUSD": "GBP/USD",
-        "FTSE": "FTSE 100",
-        "VIX": "VIX",
-    }
-    for name in ["SPX_futures", "DAX", "STOXX50", "OIL", "GOLD", "GBPUSD", "FTSE", "VIX"]:
-        data = market_data.get(name, {})
-        pct = data.get("pct_change")
-        last = data.get("last_close")
-        label = display_names.get(name, name)
-        if pct is not None and last is not None:
-            arrow = "+" if pct > 0 else ("-" if pct < 0 else "=")
-            print(f"    {label:>12s}: {last:>10.2f}  {arrow} {pct:+.2f}%")
-        else:
-            print(f"    {label:>12s}: dados indisponíveis")
-
-    # Volatility
-    print()
-    regime = vol_data.get("vol_regime", "?")
-    atr = vol_data.get("current_atr", "?")
-    avg = vol_data.get("avg_atr", "?")
-    ratio = vol_data.get("atr_ratio", "?")
-    print(f"   Volatilidade: {regime} (ATR: {atr}, Média: {avg}, Ratio: {ratio})")
-    bb_squeeze = vol_data.get("bb_squeeze")
-    if bb_squeeze is True:
-        print("   Bollinger Squeeze ATIVO — breakout iminente.")
-
-    # Calendar highlights
-    if calendar_data.get("near_open_high_impact"):
-        print()
-        print("   ALERTAS DE CALENDÁRIO (alto impacto perto da abertura):")
-        for ev in calendar_data["near_open_high_impact"]:
-            print(f"    • {ev['time_utc']} — {ev['title']} ({ev['country']})")
-
-    if calendar_data.get("high_impact_events"):
-        remaining = [
-            e for e in calendar_data["high_impact_events"]
-            if e not in calendar_data.get("near_open_high_impact", [])
-        ]
-        if remaining:
-            print()
-            print("   Outros eventos de alto impacto hoje:")
-            for ev in remaining:
-                print(f"    • {ev['time_utc']} — {ev['title']} ({ev['country']})")
-
-    print()
-    print("=" * 64)
-    print()
-
-    if show_raw:
-        print("\n--- RAW LLM RESPONSE ---")
-        print(ollama_result.get("raw_llm_response", ""))
-        print("--- END RAW LLM RESPONSE ---\n")
-
 
 # ---------------------------------------------------------------------------
 # DATA FETCHING
@@ -530,17 +78,16 @@ def fetch_economic_calendar() -> list[dict]:
     Falls back to cache if API fails.  Retries up to 4 times with jitter.
     """
     import random
-    import time as _time
 
     # --- Try cache first ---
     if CALENDAR_CACHE_FILE.exists():
         try:
-            cache_age_min = (_time_module.time() - CALENDAR_CACHE_FILE.stat().st_mtime) / 60
+            cache_age_min = (_time.time() - CALENDAR_CACHE_FILE.stat().st_mtime) / 60
             if cache_age_min < CALENDAR_CACHE_TTL_MIN:
                 with open(CALENDAR_CACHE_FILE, "r", encoding="utf-8") as f:
                     cached = json.load(f)
                 if isinstance(cached, list) and len(cached) > 0:
-                    print("   (calendar from cache)")
+                    print("   (calendar from cache)", file=__import__("sys").stderr)
                     return cached
         except Exception:
             pass  # corrupt cache, fetch fresh
@@ -566,13 +113,13 @@ def fetch_economic_calendar() -> list[dict]:
         except requests.exceptions.HTTPError as e:
             if resp.status_code == 429 and attempt < 3:
                 wait = 2 ** (attempt + 1) + random.uniform(0, 1)
-                print(f"   Calendar rate-limited, aguardando {wait:.0f}s...")
+                print(f"   Calendar rate-limited, aguardando {wait:.0f}s...", file=__import__("sys").stderr)
                 _time.sleep(wait)
                 continue
-            print(f"    Calendar fetch failed: {e}")
+            print(f"    Calendar fetch failed: {e}", file=__import__("sys").stderr)
             break
         except Exception as e:
-            print(f"    Calendar fetch failed: {e}")
+            print(f"    Calendar fetch failed: {e}", file=__import__("sys").stderr)
             break
 
     # --- Fallback: return stale cache if available ---
@@ -581,7 +128,7 @@ def fetch_economic_calendar() -> list[dict]:
             with open(CALENDAR_CACHE_FILE, "r", encoding="utf-8") as f:
                 cached = json.load(f)
             if isinstance(cached, list) and len(cached) > 0:
-                print("   (using stale cache as fallback)")
+                print("   (using stale cache as fallback)", file=__import__("sys").stderr)
                 return cached
         except Exception:
             pass
@@ -685,7 +232,7 @@ def fetch_market_data() -> dict[str, dict]:
                 "df": df,
             }
         except Exception as e:
-            print(f"    {name} ({ticker_symbol}) fetch failed: {e}")
+            print(f"    {name} ({ticker_symbol}) fetch failed: {e}", file=__import__("sys").stderr)
             results[name] = {"last_close": None, "pct_change": None, "df": None}
 
     return results
@@ -805,6 +352,155 @@ def compute_preopen_structure(market_data: dict) -> dict:
         "is_extended": is_extended,
         "big_moves": big_moves,
         "ftse_gap_pct": ftse_pct,
+    }
+
+
+def compute_ftse_volume_profile(market_data: dict) -> dict:
+    """
+    Analyse FTSE 100 volume over the last 5 days.
+    Detects volume spikes (institutional activity) vs dry volume (no conviction).
+
+    Returns:
+        volume_spike_ratio : recent vol / 5-day average (>1.5 = spike, <0.7 = dry)
+        volume_trend       : "spike" | "high" | "normal" | "dry"
+        volume_score_hint  : +1 (spike = conviction), 0 (normal), -1 (dry = no follow-through)
+        detail             : human-readable string
+    """
+    ftse_data = market_data.get("FTSE", {})
+    df = ftse_data.get("df")
+
+    base = {
+        "volume_spike_ratio": None,
+        "volume_trend": "unknown",
+        "volume_score_hint": 0,
+        "detail": "Volume FTSE indisponível.",
+    }
+
+    if df is None or "Volume" not in df.columns or len(df) < 3:
+        return base
+
+    volumes = df["Volume"].dropna().tolist()
+    if len(volumes) < 2:
+        return base
+
+    # Most recent session volume vs average of prior sessions
+    recent_vol = volumes[-1]
+    prior_vols = volumes[:-1]
+    avg_vol = sum(prior_vols) / len(prior_vols) if prior_vols else recent_vol
+
+    if avg_vol == 0:
+        return base
+
+    ratio = recent_vol / avg_vol
+
+    if ratio >= 1.5:
+        trend = "spike"
+        hint = 1
+        detail = f"Volume spike ({ratio:.2f}x média) — presença institucional, breakout com convicção."
+    elif ratio >= 1.1:
+        trend = "high"
+        hint = 1
+        detail = f"Volume acima da média ({ratio:.2f}x) — boa participação."
+    elif ratio >= 0.75:
+        trend = "normal"
+        hint = 0
+        detail = f"Volume normal ({ratio:.2f}x média)."
+    else:
+        trend = "dry"
+        hint = -1
+        detail = f"Volume seco ({ratio:.2f}x média) — baixa convicção, risco de fakeout aumentado."
+
+    return {
+        "volume_spike_ratio": round(ratio, 2),
+        "volume_trend": trend,
+        "volume_score_hint": hint,
+        "detail": detail,
+    }
+
+
+def compute_multiday_trend(market_data: dict) -> dict:
+    """
+    Analyse FTSE 100 multi-day price trend (last 5-10 days).
+    Answers: is the market in a sustained trend or choppy/ranging?
+
+    Returns:
+        direction       : "up" | "down" | "flat"
+        consistency     : fraction of days agreeing with direction (0.0-1.0)
+        momentum        : recent momentum vs earlier momentum ("accelerating"|"fading"|"stable")
+        days_analysed   : int
+        detail          : human-readable string
+        trend_score_hint: +1 (clear trend), 0 (mixed), -1 (choppy/ranging)
+    """
+    ftse_data = market_data.get("FTSE", {})
+    df = ftse_data.get("df")
+
+    base = {
+        "direction": "unknown",
+        "consistency": 0.0,
+        "momentum": "unknown",
+        "days_analysed": 0,
+        "detail": "Dados insuficientes para análise multi-day.",
+        "trend_score_hint": 0,
+    }
+
+    if df is None or len(df) < 3:
+        return base
+
+    closes = df["Close"].dropna().tolist()
+    if len(closes) < 3:
+        return base
+
+    # Daily returns
+    returns = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, len(closes))]
+    n = len(returns)
+
+    up_days = sum(1 for r in returns if r > 0.001)
+    down_days = sum(1 for r in returns if r < -0.001)
+
+    if up_days > down_days:
+        direction = "up"
+        consistency = up_days / n
+    elif down_days > up_days:
+        direction = "down"
+        consistency = down_days / n
+    else:
+        direction = "flat"
+        consistency = 0.5
+
+    # Momentum: compare recent half vs earlier half
+    mid = n // 2
+    earlier = sum(returns[:mid]) / mid if mid > 0 else 0
+    recent = sum(returns[mid:]) / (n - mid) if (n - mid) > 0 else 0
+
+    if direction == "up":
+        momentum = "accelerating" if recent > earlier else ("fading" if recent < earlier * 0.5 else "stable")
+    elif direction == "down":
+        momentum = "accelerating" if recent < earlier else ("fading" if recent > earlier * 0.5 else "stable")
+    else:
+        momentum = "stable"
+
+    # Score hint
+    if consistency >= 0.7 and momentum != "fading":
+        hint = 1
+    elif consistency <= 0.45 or direction == "flat":
+        hint = -1
+    else:
+        hint = 0
+
+    pct_total = (closes[-1] - closes[0]) / closes[0] * 100
+    detail = (
+        f"Tendência {direction} ({n} dias): {up_days}d sobe / {down_days}d desce. "
+        f"Consistência: {consistency:.0%}. Momentum: {momentum}. "
+        f"Variação total: {pct_total:+.2f}%."
+    )
+
+    return {
+        "direction": direction,
+        "consistency": round(consistency, 2),
+        "momentum": momentum,
+        "days_analysed": n,
+        "detail": detail,
+        "trend_score_hint": hint,
     }
 
 
@@ -940,10 +636,14 @@ def score_3_correlations(market_data: dict) -> tuple[int, str]:
     return 0, f"Confuso / divergente. {detail_str}"
 
 
-def score_4_volatility(vol_data: dict, market_data: dict | None = None) -> tuple[int, str]:
+def score_4_volatility(
+    vol_data: dict,
+    market_data: dict | None = None,
+    volume_data: dict | None = None,
+) -> tuple[int, str]:
     """
     4. CONDIÇÃO DE VOLATILIDADE (0-2 pontos)
-       Combines ATR regime + Bollinger Squeeze + VIX level.
+       Combines ATR regime + Bollinger Squeeze + VIX level + FTSE volume profile.
        0 = Baixa qualidade (fakeouts prováveis / VIX extremo)
        1 = Médio
        2 = Alta probabilidade de expansão / sweet spot
@@ -963,44 +663,56 @@ def score_4_volatility(vol_data: dict, market_data: dict | None = None) -> tuple
     if vix_level is not None:
         vix_str = f", VIX: {vix_level:.1f}"
 
+    # Volume context
+    vol_hint = 0
+    vol_hint_str = ""
+    if volume_data:
+        vol_hint = volume_data.get("volume_score_hint", 0)
+        vol_detail = volume_data.get("detail", "")
+        vol_hint_str = f" | {vol_detail}"
+
     if regime == "unknown":
-        return 1, f"Dados insuficientes para avaliar volatilidade. Classificado como médio.{vix_str}"
+        return 1, f"Dados insuficientes para avaliar volatilidade.{vix_str}"
 
     detail = f"ATR atual: {current_atr}, ATR médio: {avg_atr}, Ratio: {atr_ratio}{vix_str}"
 
-    # Bollinger squeeze bonus info
-    squeeze_str = ""
-    if bb_squeeze is True:
-        squeeze_str = " Bollinger Squeeze ATIVO — breakout iminente."
-    elif bb_squeeze is False:
-        squeeze_str = ""
+    squeeze_str = " Bollinger Squeeze ATIVO — breakout iminente." if bb_squeeze is True else ""
 
-    # VIX extreme check: VIX > 30 means chaos, even expansion is risky
+    # VIX extreme check: VIX > 30 = chaos
     if vix_level is not None and vix_level > 30:
-        return 0, f"VIX extremo ({vix_level:.1f}) — volatilidade excessiva, alto risco de fakeout. {detail}"
+        return 0, f"VIX extremo ({vix_level:.1f}) — volatilidade excessiva, risco de fakeout. {detail}"
 
     if regime == "expansion":
-        # VIX sweet spot (15-25) + expansion = best conditions
+        base_score = 2
         if vix_level is not None and 15 <= vix_level <= 25:
-            return 2, f"Condições ideais: expansão ATR + VIX em zona ótima ({vix_level:.1f}). {detail}{squeeze_str}"
-        return 2, f"Alta probabilidade de expansão. Ambiente favorece breakout. {detail}{squeeze_str}"
+            msg = f"Condições ideais: expansão ATR + VIX zona ótima ({vix_level:.1f}). {detail}{squeeze_str}{vol_hint_str}"
+        else:
+            msg = f"Expansão ATR. Ambiente favorece breakout. {detail}{squeeze_str}{vol_hint_str}"
+        # Volume dry on expansion = slight caution but still expansion
+        return max(1, base_score + min(0, vol_hint)), msg
 
     if regime == "compression":
-        # But if BB squeeze is active, compression = pending breakout (positive)
         if bb_squeeze is True:
-            return 1, f"Compressão com Bollinger Squeeze — breakout pendente. {detail}{squeeze_str}"
-        return 0, f"Compressão detectada. Propenso a fakeouts. {detail}"
+            return 1, f"Compressão com Bollinger Squeeze — breakout pendente. {detail}{squeeze_str}{vol_hint_str}"
+        # Dry volume + compression = worst case
+        score = max(0, -1 + (1 if vol_hint >= 0 else 0))
+        return score, f"Compressão detectada. Propenso a fakeouts. {detail}{vol_hint_str}"
 
-    # Neutral regime
+    # Neutral regime — volume hint can shift it
     if bb_squeeze is True:
-        return 2, f"Squeeze activo em regime neutro — breakout provável. {detail}{squeeze_str}"
-    return 1, f"Volatilidade média/neutra. {detail}"
+        return 2, f"Squeeze em regime neutro — breakout provável. {detail}{squeeze_str}{vol_hint_str}"
+    base = 1 + vol_hint
+    return max(0, min(2, base)), f"Volatilidade neutra. {detail}{vol_hint_str}"
 
 
-def score_5_preopen_structure(structure_data: dict) -> tuple[int, str]:
+def score_5_preopen_structure(
+    structure_data: dict,
+    trend_data: dict | None = None,
+) -> tuple[int, str]:
     """
-    5. ESTRUTURA PRÉ-ABERTURA (0–2 pontos)
-       0 = Esticado / exausto
+    5. ESTRUTURA PRÉ-ABERTURA (0-2 pontos)
+       Combines overnight extension check + multi-day trend context.
+       0 = Esticado / exausto / tendência inconsistente
        1 = Neutro
        2 = Bem posicionado para rompimento limpo
     """
@@ -1008,17 +720,36 @@ def score_5_preopen_structure(structure_data: dict) -> tuple[int, str]:
     big_moves = structure_data.get("big_moves", [])
     ftse_gap = structure_data.get("ftse_gap_pct")
 
+    # Multi-day trend context
+    trend_hint = 0
+    trend_str = ""
+    if trend_data and trend_data.get("direction") != "unknown":
+        trend_hint = trend_data.get("trend_score_hint", 0)
+        direction = trend_data.get("direction", "?")
+        consistency = trend_data.get("consistency", 0)
+        momentum = trend_data.get("momentum", "?")
+        trend_str = f" | Tendência {direction} ({consistency:.0%} consistência, momentum {momentum})."
+
     if is_extended:
         moves_str = ", ".join(big_moves) if big_moves else "múltiplos ativos estendidos"
-        return 0, f"Mercado já esticado antes da abertura. {moves_str}"
+        return 0, f"Mercado já esticado antes da abertura. {moves_str}{trend_str}"
 
     if ftse_gap is not None and abs(ftse_gap) > 0.5:
-        return 1, f"FTSE gap moderado ({ftse_gap:+.2f}%). Estrutura neutra."
+        # Moderate gap — trend can tip it
+        base = 1
+        score = max(0, min(2, base + trend_hint))
+        return score, f"FTSE gap moderado ({ftse_gap:+.2f}%).{trend_str}"
 
     if ftse_gap is not None:
-        return 2, f"Bem posicionado para rompimento limpo. FTSE gap: {ftse_gap:+.2f}%"
+        # Clean gap — trend seals it
+        base = 2
+        score = max(0, min(2, base + min(0, trend_hint)))  # trend can only hurt here, not add
+        return score, f"Estrutura limpa. FTSE gap: {ftse_gap:+.2f}%.{trend_str}"
 
-    return 1, "Estrutura neutra. Dados de gap indisponíveis."
+    # No gap data — fall back to trend hint
+    base = 1
+    score = max(0, min(2, base + trend_hint))
+    return score, f"Dados de gap indisponíveis.{trend_str}"
 
 
 # ---------------------------------------------------------------------------
@@ -1153,6 +884,8 @@ def print_full_output(
     calendar_data: dict,
     market_data: dict,
     vol_data: dict,
+    volume_data: dict,
+    trend_data: dict,
     structure_data: dict,
     show_raw: bool = False,
 ):
@@ -1231,6 +964,20 @@ def print_full_output(
     if bb_squeeze is True:
         print("   Bollinger Squeeze ATIVO — breakout iminente.")
 
+    # Volume
+    vol_trend = volume_data.get("volume_trend", "unknown")
+    vol_ratio = volume_data.get("volume_spike_ratio")
+    if vol_ratio is not None:
+        print(f"   Volume FTSE: {vol_trend} ({vol_ratio:.2f}x média) — {volume_data.get('detail', '')}")
+
+    # Multi-day trend
+    t_dir = trend_data.get("direction", "unknown")
+    t_cons = trend_data.get("consistency")
+    t_mom = trend_data.get("momentum", "?")
+    t_days = trend_data.get("days_analysed", 0)
+    if t_dir != "unknown" and t_days > 0:
+        print(f"   Tendência {t_days}d: {t_dir} | Consistência: {t_cons:.0%} | Momentum: {t_mom}")
+
     # Calendar highlights
     if calendar_data.get("near_open_high_impact"):
         print()
@@ -1262,6 +1009,8 @@ def print_full_output(
                 for k, v in market_data.items()
             },
             "volatility": {k: v for k, v in vol_data.items() if k != "df"},
+            "volume": volume_data,
+            "trend": trend_data,
             "structure": structure_data,
             "scores": [
                 {"module": section_names[i], "score": s, "detail": d}
@@ -1283,6 +1032,8 @@ def output_json(
     calendar_data: dict,
     market_data: dict,
     vol_data: dict,
+    volume_data: dict,
+    trend_data: dict,
     structure_data: dict,
 ):
     """Output the analysis as a JSON object."""
@@ -1311,6 +1062,12 @@ def output_json(
             k: v for k, v in vol_data.items()
             if k not in ("df",)
         },
+        "volume": {
+            k: v for k, v in volume_data.items()
+        },
+        "trend": {
+            k: v for k, v in trend_data.items()
+        },
         "calendar": {
             "high_impact_count": calendar_data["total_high"],
             "near_open_high": calendar_data["has_near_open_high"],
@@ -1334,18 +1091,15 @@ def _safe_pct(market_data: dict, key: str) -> float | None:
 # MAIN
 # ---------------------------------------------------------------------------
 
-def run_analysis(show_raw: bool = False, output_format: str = "text",
-                 use_ollama: bool = False, ollama_model: str = DEFAULT_OLLAMA_MODEL) -> dict:
+def run_analysis(show_raw: bool = False, output_format: str = "text") -> dict:
     """
     Run the complete pre-open analysis pipeline.
-    If use_ollama=True, feeds real data to local LLM for institutional analysis.
     Returns a dict with all results.
     """
     now = datetime.now()
 
     if output_format == "text":
-        mode_label = f"Ollama ({ollama_model})" if use_ollama else "Rule-based"
-        print(f"\n  UK100 ORB Pre-Open Filter [{mode_label}] — a correr às {now.strftime('%H:%M:%S')}")
+        print(f"\n  UK100 ORB Pre-Open Filter — a correr às {now.strftime('%H:%M:%S')}")
         print("  A buscar dados reais...\n")
 
     # 1. Fetch data
@@ -1362,83 +1116,21 @@ def run_analysis(show_raw: bool = False, output_format: str = "text",
     market_data = fetch_market_data()
 
     if output_format == "text":
-        print("  [3/3] Volatilidade e estrutura pré-abertura...")
+        print("  [3/3] Volatilidade, volume e estrutura pré-abertura...")
     vol_data = compute_ftse_volatility(market_data)
+    volume_data = compute_ftse_volume_profile(market_data)
+    trend_data = compute_multiday_trend(market_data)
     structure_data = compute_preopen_structure(market_data)
 
     if output_format == "text":
         print("\n   Dados carregados. A calcular scores...\n")
 
-    # ---------------------------------------------------------------
-    # BRANCH: Ollama LLM mode vs Rule-based mode
-    # ---------------------------------------------------------------
-    if use_ollama:
-        # === OLLAMA MODE: Feed real data to local LLM ===
-        ollama_result = ollama_scoring(
-            calendar_data, market_data, vol_data, structure_data,
-            model=ollama_model,
-        )
-
-        if ollama_result is None:
-            print("   Ollama falhou. A usar scoring rule-based como fallback...\n")
-            use_ollama = False  # Fall through to rule-based below
-        else:
-            # Output
-            if output_format == "json":
-                json_result = {
-                    "timestamp": now.isoformat(),
-                    "mode": "ollama",
-                    "model": ollama_result.get("model"),
-                    "response_time_s": ollama_result.get("response_time_s"),
-                    "score": ollama_result.get("score"),
-                    "classification": ollama_result.get("classification"),
-                    "direction": ollama_result.get("direction"),
-                    "summary": ollama_result.get("summary"),
-                    "market_snapshot": {
-                        k: {"last_close": v.get("last_close"), "pct_change": v.get("pct_change")}
-                        for k, v in market_data.items()
-                    },
-                    "volatility": {k: v for k, v in vol_data.items() if k != "df"},
-                    "calendar": {
-                        "high_impact_count": calendar_data.get("total_high", 0),
-                        "near_open_high": calendar_data.get("has_near_open_high", False),
-                        "events": calendar_data.get("high_impact_events", []),
-                    },
-                }
-                if show_raw:
-                    json_result["raw_llm_response"] = ollama_result.get("raw_llm_response")
-                print(json.dumps(json_result, indent=2, ensure_ascii=False))
-            else:
-                print_ollama_output(
-                    ollama_result, calendar_data, market_data,
-                    vol_data, structure_data, show_raw=show_raw,
-                )
-
-            # Save
-            result = {
-                "timestamp": now.isoformat(),
-                "mode": "ollama",
-                "model": ollama_result.get("model"),
-                "score": ollama_result.get("score"),
-                "classification": ollama_result.get("classification"),
-                "direction": ollama_result.get("direction"),
-                "summary": ollama_result.get("summary"),
-            }
-            try:
-                with open("last_analysis.json", "w", encoding="utf-8") as f:
-                    json.dump(result, f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
-            return result
-
-    # === RULE-BASED MODE (fast, deterministic) ===
-
     # 2. Score all 5 modules
     s1 = score_1_macro_events(calendar_data)
     s2 = score_2_global_sentiment(market_data)
     s3 = score_3_correlations(market_data)
-    s4 = score_4_volatility(vol_data, market_data)
-    s5 = score_5_preopen_structure(structure_data)
+    s4 = score_4_volatility(vol_data, market_data, volume_data)
+    s5 = score_5_preopen_structure(structure_data, trend_data)
 
     scores = [s1, s2, s3, s4, s5]
     total_score = sum(s for s, _ in scores)
@@ -1454,12 +1146,12 @@ def run_analysis(show_raw: bool = False, output_format: str = "text",
     if output_format == "json":
         output_json(
             scores, total_score, classification, direction, summary,
-            calendar_data, market_data, vol_data, structure_data,
+            calendar_data, market_data, vol_data, volume_data, trend_data, structure_data,
         )
     else:
         print_full_output(
             scores, total_score, classification, direction, summary,
-            calendar_data, market_data, vol_data, structure_data,
+            calendar_data, market_data, vol_data, volume_data, trend_data, structure_data,
             show_raw=show_raw,
         )
 
@@ -1487,39 +1179,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python uk100_orb_filter.py                    # Rule-based (instant)
-  python uk100_orb_filter.py --ollama           # Ollama LLM institutional analysis
-  python uk100_orb_filter.py --ollama --model mistral:7b-instruct-q4_K_M
-  python uk100_orb_filter.py --ollama --raw     # Ollama + show raw LLM response
-  python uk100_orb_filter.py --json             # Output as JSON only
+  python uk100_orb_filter.py          # Full analysis
+  python uk100_orb_filter.py --raw    # Analysis + raw data debug
+  python uk100_orb_filter.py --json   # Output as JSON
         """,
     )
     parser.add_argument(
         "--raw", action="store_true",
-        help="Print raw data at the end for debugging",
+        help="Print raw fetched data at the end (debug)",
     )
     parser.add_argument(
         "--json", action="store_true",
         help="Output result as JSON (machine-readable)",
     )
-    parser.add_argument(
-        "--ollama", action="store_true",
-        help="Use local Ollama LLM for institutional-grade analysis (requires ollama running)",
-    )
-    parser.add_argument(
-        "--model", type=str, default=DEFAULT_OLLAMA_MODEL,
-        help=f"Ollama model to use (default: {DEFAULT_OLLAMA_MODEL}). "
-             f"Examples: llama3:8b, mistral:7b-instruct-q4_K_M, llama3.1:8b",
-    )
     args = parser.parse_args()
 
     output_format = "json" if args.json else "text"
-    run_analysis(
-        show_raw=args.raw,
-        output_format=output_format,
-        use_ollama=args.ollama,
-        ollama_model=args.model,
-    )
+    run_analysis(show_raw=args.raw, output_format=output_format)
 
 
 if __name__ == "__main__":
